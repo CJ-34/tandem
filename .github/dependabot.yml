@@ -1,14 +1,21 @@
+# Updates arrive once a month, grouped so there are at most three pull
+# requests: the build tools, Electron itself, and the CI actions.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       dev-tools:
         patterns: ["*"]
         exclude-patterns: ["electron", "electron-builder"]
+      electron:
+        patterns: ["electron", "electron-builder"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -24,7 +24,7 @@ Windows SmartScreen may warn the first time you run them because they aren’t c
 2. On GitHub, open the Actions tab, choose “Build Windows installer”, and click “Run workflow”. It runs the checks first, then builds.
 3. When it finishes (about 5 minutes), download the `Tandem-Windows` artifact from the run page. It contains both .exe files.
 
-Pushing a tag such as `v1.0.1` also triggers a build.
+Every push to `main` also builds them, and a new version number publishes a release (see below).
 
 ## Run from source while developing
 
@@ -47,12 +47,15 @@ The tests live in `tests/` and use Playwright to launch Tandem against a throwaw
 
 - **CI** (`.github/workflows/ci.yml`) runs lint and the smoke tests on Windows and Linux for every push and pull request. If a test fails, the report is attached to the run.
 - **Build** (`.github/workflows/build.yml`) runs CI first, then builds the installer and portable .exe. It runs on every push to `main` (download them from the run’s `Tandem-Windows` artifact) and can be started by hand from the Actions tab.
-- **Releases**: change `"version"` in `package.json`, commit, then push a matching tag, e.g. `git tag v1.0.1 && git push origin v1.0.1`. The Build workflow checks the tag matches the version, then publishes a GitHub Release with both .exe files and generated release notes.
-- **Dependabot** (`.github/dependabot.yml`) opens weekly pull requests to update npm packages and GitHub Actions. Electron updates come one at a time so each can be tested on its own.
+- **Releases**: after a successful build on `main`, the workflow publishes a GitHub Release if `package.json` has a version that hasn't been released yet. It tags the commit (for example `v1.1.0`) and attaches both .exe files with generated release notes. Pushes that keep the same version only build. Pushing a `v*` tag by hand still works too, as long as it matches the version.
+- **Dependabot** (`.github/dependabot.yml`) checks once a month and groups its updates into at most three pull requests: build tools, Electron, and the CI actions.
 
 ## Releasing a new version
 
-Change `"version"` in `package.json`, then build again, or push a tag as described above. The installer upgrades an existing installation in place and keeps the user’s tabs and settings.
+1. Raise `"version"` in `package.json` (for example `1.1.0` to `1.2.0`).
+2. Commit and push to `main`.
+
+The release appears on the repository's Releases page a few minutes later. The installer upgrades an existing installation in place and keeps the user’s tabs and settings.
 
 ## Keyboard
 
@@ -75,6 +78,9 @@ Change `"version"` in `package.json`, then build again, or push a tag as describ
 | Esc | Clear the filter, then the selection |
 | Start typing | Filter the current folder |
 | F2 or Shift+F6 | Rename |
+| Ctrl+M | Multi-rename the selected items with masks (`[N]` name, `[E]` extension, `[C]` counter, `[YMD]` date, `[N1-3]` part of the name), find and replace, and case changes. Can be undone |
+| Shift+F2 | Compare with the other pane: selects what the other side is missing or has an older copy of, ready for F5 |
+| Ctrl+Shift+S | Synchronize folders: compares two folder trees, including subfolders, and copies the differences either or both ways. Never deletes |
 | F3 | View text or image |
 | F4 | Open with the default app |
 | Shift+F4 | New file, then open it |
@@ -105,14 +111,14 @@ Tabs, folders, favorites, sort order, theme and pane sizes are remembered betwee
 
 ## Project layout
 
-- `main.js`: window setup and all file system work (listing, copy and move with progress, delete to Recycle Bin, rename, preview, folder sizes, file search, file icons, folder watching, clipboard).
+- `main.js`: window setup and all file system work (listing, copy and move with progress, delete to Recycle Bin, rename and multi-rename, preview, folder sizes, file search, folder comparison, file icons, folder watching, clipboard).
 - `preload.js`: the small, safe bridge between the window and the file system code.
 - `renderer/`: the interface (`index.html`, `styles.css`, `app.js`).
 - `build/`: the app icon and installer artwork.
 - `build-installer.bat`: one-click build on Windows.
 - `tests/`: end-to-end smoke tests (Playwright).
-- `.github/workflows/`: CI (`ci.yml`) and the installer build and release (`build.yml`).
+- `.github/workflows/`: CI (`ci.yml`) and the installer build and release (`build.yml`). `dependabot.yml` sets up the monthly update pull requests.
 
 ## Not included yet
 
-Browsing inside archives, FTP/SFTP, plugins, multi-rename, and folder compare/sync. The code is structured so each of these can be added as another handler in `main.js` plus a command in `app.js`.
+Browsing inside archives, FTP/SFTP, plugins, a built-in text editor, and a thumbnail view. The code is structured so each of these can be added as another handler in `main.js` plus a command in `app.js`.

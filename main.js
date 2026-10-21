@@ -26,8 +26,9 @@ const IMAGE_MIME = {
 
 let win = null;
 
-// Lets the automated tests run with a fresh, throwaway profile.
+// Let the automated tests run with a throwaway profile and home folder.
 if (process.env.TANDEM_USER_DATA) app.setPath('userData', process.env.TANDEM_USER_DATA);
+const HOME = process.env.TANDEM_HOME || os.homedir();
 
 /* Problems are written to tandem.log in the app's data folder
    (%APPDATA%\Tandem on Windows) so they can be diagnosed after the fact. */
@@ -148,7 +149,7 @@ async function mapLimit(items, limit, fn) {
 ipcMain.handle('app:info', () => ({
   platform: process.platform,
   sep: path.sep,
-  home: os.homedir(),
+  home: HOME,
   dark: nativeTheme.shouldUseDarkColors,
 }));
 

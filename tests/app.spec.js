@@ -20,8 +20,9 @@ test.beforeEach(async () => {
     args: [path.join(__dirname, '..')],
     env: {
       ...process.env,
-      HOME: home,
-      USERPROFILE: home,
+      // Only Tandem's start folder: faking the real profile makes Windows
+      // write its own AppData folder into the test's home.
+      TANDEM_HOME: home,
       TANDEM_USER_DATA: path.join(root, 'profile'),
     },
   });

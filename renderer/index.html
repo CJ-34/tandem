@@ -19,6 +19,9 @@
       <button id="btn-find" class="tb-btn" title="Find files (Alt+F7)">
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="m10.4 10.4 3.6 3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
       </button>
+      <button id="btn-sync" class="tb-btn" title="Synchronize folders (Ctrl+Shift+S)">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5h9.25M9.5 3l2.5 2.5L9.5 8M13.5 10.5H4.25M6.5 8 4 10.5 6.5 13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <button id="btn-qv" class="tb-btn" title="Quick view in the other pane (Ctrl+Q)" aria-pressed="false">
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 2.75v10.5" stroke="currentColor" stroke-width="1.2"/><path d="M10 6h2.5M10 8h2.5M10 10h1.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
       </button>
@@ -38,7 +41,7 @@
   </main>
 
   <footer class="actionbar">
-    <button data-act="rename"><kbd>F2</kbd>Rename</button>
+    <button data-act="rename" data-sact="compare"><kbd>F2</kbd><span class="l">Rename</span><span class="ls">Compare</span></button>
     <button data-act="view"><kbd>F3</kbd>View</button>
     <button data-act="open" data-sact="newfile"><kbd>F4</kbd><span class="l">Open</span><span class="ls">New file</span></button>
     <button data-act="copy" data-sact="copyas"><kbd>F5</kbd><span class="l">Copy</span><span class="ls">Copy here</span></button>

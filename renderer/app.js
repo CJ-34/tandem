@@ -739,6 +739,8 @@ function fmtDuration(sec) {
 }
 
 function onProgress(pr) {
+  const scan = syncProgress.get(pr.id);
+  if (scan) { scan(pr); return; }
   const job = jobs.get(pr.id);
   if (!job || $('.job-x', job.el).disabled) return;
   const bar = $('.job-bar', job.el);
@@ -1074,12 +1076,16 @@ function showMenu(x, y, p, keyboard = false) {
     many && { label: 'Move to other pane', key: 'F6', run: () => transfer('move') },
     real && { label: 'Copy here as…', key: 'Shift+F5', run: () => transfer('copy', { here: true }) },
     real && { label: 'Rename', key: 'F2', run: doRename },
+    many && { label: 'Multi-rename…', key: 'Ctrl+M', run: () => showRenamer(p) },
+    lastRename && samePath(lastRename.dir, pathOf(p)) && { label: 'Undo multi-rename', run: () => undoRename(p) },
     { label: 'New folder', key: 'F7', run: doMkdir },
     { label: 'New file', key: 'Shift+F4', run: doNewFile },
     { sep: true },
     { label: 'Select by pattern…', key: 'Num +', run: () => selectByMask(p, true) },
     { label: 'Unselect by pattern…', key: 'Num −', run: () => selectByMask(p, false) },
     { label: 'Invert selection', key: 'Num *', run: () => invertSel(p) },
+    { label: 'Compare with other pane', key: 'Shift+F2', run: compareDirs },
+    { label: 'Synchronize folders…', key: 'Ctrl+Shift+S', run: showSync },
     { sep: true },
     { label: INFO.platform === 'win32' ? 'Show in File Explorer' : 'Show in file manager', run: () => (real ? api.reveal(full) : api.open(full)) },
     { label: many > 1 ? 'Copy paths' : 'Copy path', run: () => copyPaths(p) },
@@ -1298,6 +1304,447 @@ function showFind(p) {
   f.mask.focus();
   f.mask.select();
 }
+
+/* ---------- large dialogs ---------- */
+/* Shared plumbing for the full-size tool dialogs: focus is restored and
+   keys stay inside the dialog while it is open. */
+function toolDialog(cls, html, { onKey, onClose } = {}) {
+  modalOpen = true;
+  hideMenu();
+  const prevFocus = document.activeElement;
+  const wrap = document.createElement('div');
+  wrap.className = 'scrim';
+  wrap.innerHTML = `<div class="finder ${cls}" role="dialog" aria-modal="true">${html}</div>`;
+  $('#modal-root').append(wrap);
+  const key = (e) => {
+    e.stopPropagation();
+    if (onKey && onKey(e)) return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  };
+  const close = () => {
+    if (!wrap.isConnected) return;
+    if (onClose) onClose();
+    wrap.remove();
+    modalOpen = false;
+    document.removeEventListener('keydown', key, true);
+    (prevFocus && prevFocus.isConnected && prevFocus !== document.body ? prevFocus : act().list).focus();
+  };
+  document.addEventListener('keydown', key, true);
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) close(); });
+  $('[data-close]', wrap).addEventListener('click', close);
+  return { wrap, close };
+}
+
+/* ---------- multi-rename (Ctrl+M) ---------- */
+/* Total Commander style masks: [N] name, [E] extension, [C] counter,
+   [P] folder, [YMD]/[hms] modified date and time, and character ranges
+   such as [N1-3], [N2,4] (4 characters from the 2nd) or [N-3-] (last 3). */
+const renameOpts = { name: '[N]', ext: '[E]', search: '', replace: '', regex: false, matchCase: false, caseMode: 'keep', start: 1, step: 1, digits: 1 };
+let lastRename = null; // { dir, pairs } that put the last batch back
+
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function rangeOf(str, spec) {
+  if (!spec) return str;
+  const m = /^(-?\d+)(?:(-)(-?\d+)?|,(\d+))?$/.exec(spec);
+  if (!m) return null;
+  const len = str.length;
+  const at = (n) => (n > 0 ? n - 1 : len + n);
+  const from = at(+m[1]);
+  if (m[4] != null) return str.substr(Math.max(0, from), +m[4]);
+  if (!m[2]) return str.charAt(from);
+  const to = m[3] != null ? at(+m[3]) : len - 1;
+  return str.slice(Math.max(0, from), to + 1);
+}
+
+function clientNameProblem(n) {
+  if (!n || !n.trim()) return 'The name is empty.';
+  if (/[\\/:*?"<>|\x00-\x1f]/.test(n)) return 'Names can’t contain \\ / : * ? " < > |';
+  if (n === '.' || n === '..') return 'That name is reserved.';
+  if (SEP === '\\' && /[ .]$/.test(n)) return 'Names can’t end with a space or period.';
+  return null;
+}
+
+/* Works out every new name. Returns { rows, error } where each row has
+   from, to and problem. */
+function planRename(p, names, o) {
+  const two = (n) => String(n).padStart(2, '0');
+  const DATE = { Y: (d) => String(d.getFullYear()), M: (d) => two(d.getMonth() + 1), D: (d) => two(d.getDate()), h: (d) => two(d.getHours()), m: (d) => two(d.getMinutes()), s: (d) => two(d.getSeconds()) };
+  let re = null;
+  if (o.search) {
+    try { re = new RegExp(o.regex ? o.search : reEscape(o.search), o.matchCase ? 'g' : 'gi'); } catch (err) { return { rows: [], error: `The search pattern isn’t valid: ${err.message}` }; }
+  }
+  const replacement = o.regex ? o.replace : o.replace.replace(/\$/g, '$$$$');
+  const folder = baseName(pathOf(p));
+  const entries = new Map(p.listing.entries.map((e) => [e.name, e]));
+  let bad = null;
+  const rows = names.map((name, i) => {
+    const e = entries.get(name) || { name, isDir: false, mtime: 0 };
+    const dot = e.isDir ? -1 : name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot + 1) : '';
+    const d = new Date(e.mtime);
+    const counter = String(o.start + i * o.step).padStart(o.digits, '0');
+    const expand = (mask) => mask.replace(/\[([NE])([^\]]*)\]|\[([PC])\]|\[([YMDhms]+)\]/g, (all, ne, spec, pc, date) => {
+      if (ne) {
+        const r = rangeOf(ne === 'N' ? stem : ext, spec);
+        if (r == null) bad = bad || `“${all}” isn’t a range Tandem understands. Try [N2-5] or [N1,3].`;
+        return r ?? '';
+      }
+      if (pc === 'P') return folder;
+      if (pc === 'C') return counter;
+      return [...date].map((ch) => DATE[ch](d)).join('');
+    });
+    const base = expand(o.name);
+    const extOut = e.isDir ? '' : expand(o.ext);
+    let to = extOut ? `${base}.${extOut}` : base;
+    if (re) to = to.replace(re, replacement);
+    if (o.caseMode === 'lower') to = to.toLowerCase();
+    else if (o.caseMode === 'upper') to = to.toUpperCase();
+    else if (o.caseMode === 'first') to = to.charAt(0).toUpperCase() + to.slice(1).toLowerCase();
+    else if (o.caseMode === 'title') to = to.toLowerCase().replace(/(^|[\s\-_.([])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+    return { from: name, to, problem: clientNameProblem(to) };
+  });
+  if (bad) return { rows: [], error: bad };
+  const fold = (s) => (SEP === '\\' ? s.toLowerCase() : s);
+  const moving = new Set(names.map(fold));
+  const others = new Set(p.listing.entries.map((e) => fold(e.name)).filter((n) => !moving.has(n)));
+  const count = new Map();
+  for (const r of rows) count.set(fold(r.to), (count.get(fold(r.to)) || 0) + 1);
+  for (const r of rows) {
+    if (r.problem) continue;
+    if (count.get(fold(r.to)) > 1) r.problem = 'Another item in this batch gets the same name.';
+    else if (others.has(fold(r.to))) r.problem = 'Something with this name is already in the folder.';
+  }
+  return { rows, error: null };
+}
+
+async function undoRename(p) {
+  const undo = lastRename;
+  if (!undo) return;
+  const res = await api.renameMany(undo.dir, undo.pairs);
+  lastRename = null;
+  if (res.errors.length) toast(res.errors.slice(0, 3).join('\n'), 'error');
+  if (res.done.length) toast(`Put back ${plural(res.done.length, 'name', 'names')}.`, 'ok');
+  if (samePath(pathOf(p), undo.dir)) p.selected = new Set(res.done.map((pr) => pr.to));
+  await refreshAll();
+}
+
+function showRenamer(p) {
+  const names = targets(p);
+  if (!names.length) { toast('Select the files to rename first.', 'info'); return; }
+  const dir = pathOf(p);
+  const canUndo = lastRename && samePath(lastRename.dir, dir);
+  const chips = [['[N]', 'Name'], ['[E]', 'Extension'], ['[C]', 'Counter'], ['[P]', 'Folder'], ['[YMD]', 'Date'], ['[hms]', 'Time'], ['[N1-3]', 'Part of name']];
+  const html = `<header><h2>Rename ${plural(names.length, 'item', 'items')}</h2><button class="btn" data-close>Close</button></header>
+    <form class="rn-form" autocomplete="off">
+      <label class="dlg-field"><span>Name</span><input class="dlg-input" name="name" spellcheck="false"></label>
+      <label class="dlg-field rn-ext"><span>Extension</span><input class="dlg-input" name="ext" spellcheck="false"></label>
+      <div class="rn-chips">${chips.map(([t, l]) => `<button type="button" class="chip" data-ins="${t}" title="Insert ${t}">${l} <code>${t}</code></button>`).join('')}</div>
+      <label class="dlg-field"><span>Find</span><input class="dlg-input" name="search" spellcheck="false" placeholder="Optional"></label>
+      <label class="dlg-field"><span>Replace with</span><input class="dlg-input" name="replace" spellcheck="false"></label>
+      <div class="find-opts rn-opts">
+        <label><input type="checkbox" name="regex"> Regular expression</label>
+        <label><input type="checkbox" name="matchCase"> Match case</label>
+        <label>Case <select name="caseMode" class="dlg-select">
+          <option value="keep">Unchanged</option><option value="lower">lowercase</option><option value="upper">UPPERCASE</option>
+          <option value="first">First letter capital</option><option value="title">Every Word Capital</option></select></label>
+        <label>Counter from <input class="dlg-num" name="start" type="number"></label>
+        <label>step <input class="dlg-num" name="step" type="number"></label>
+        <label>digits <input class="dlg-num" name="digits" type="number" min="1" max="10"></label>
+      </div>
+    </form>
+    <div class="find-status rn-status" aria-live="polite"></div>
+    <div class="find-results rn-list" role="table" aria-label="Preview"></div>
+    <footer><span class="find-tip">Enter renames. Changes can be undone right after.</span>
+      ${canUndo ? '<button class="btn" data-undo>Undo last rename</button>' : ''}
+      <button class="btn primary" data-go>Rename</button></footer>`;
+  let plan = { rows: [], error: null };
+  let busy = false;
+  const go = async () => {
+    if (busy) return;
+    const changed = plan.rows.filter((r) => r.to !== r.from);
+    if (plan.error || plan.rows.some((r) => r.problem)) { toast('Fix the names marked in red first.', 'error'); return; }
+    if (!changed.length) { dlg.close(); return; }
+    busy = true;
+    const res = await api.renameMany(dir, changed.map(({ from, to }) => ({ from, to })));
+    busy = false;
+    if (res.done.length) lastRename = { dir, pairs: res.done.map((pr) => ({ from: pr.to, to: pr.from })) };
+    if (res.errors.length) {
+      toast(res.errors.slice(0, 3).join('\n') + (res.errors.length > 3 ? `\n…and ${res.errors.length - 3} more` : ''), 'error');
+      if (!res.done.length) return;
+    }
+    dlg.close();
+    const renamed = new Map(res.done.map((pr) => [pr.from, pr.to]));
+    p.selected = new Set([...p.selected].map((n) => renamed.get(n) || n));
+    const cur = currentName(p);
+    await refreshAll(renamed.get(cur) || cur);
+    toast(`Renamed ${plural(res.done.length, 'item', 'items')}. Open Multi-rename again to undo.`, 'ok');
+  };
+  const dlg = toolDialog('renamer', html, {
+    onKey: (e) => {
+      if (e.key === 'Enter' && e.target.tagName !== 'BUTTON' && e.target.tagName !== 'SELECT') { e.preventDefault(); go(); return true; }
+      return false;
+    },
+  });
+  const { wrap } = dlg;
+  const f = $('.rn-form', wrap).elements;
+  const list = $('.rn-list', wrap);
+  const status = $('.rn-status', wrap);
+  for (const k of ['name', 'ext', 'search', 'replace', 'caseMode', 'start', 'step', 'digits']) f[k].value = renameOpts[k];
+  f.regex.checked = renameOpts.regex;
+  f.matchCase.checked = renameOpts.matchCase;
+  let lastMask = f.name;
+
+  const update = () => {
+    Object.assign(renameOpts, {
+      name: f.name.value, ext: f.ext.value, search: f.search.value, replace: f.replace.value,
+      regex: f.regex.checked, matchCase: f.matchCase.checked, caseMode: f.caseMode.value,
+      start: Number.isFinite(+f.start.value) ? +f.start.value : 1,
+      step: Number.isFinite(+f.step.value) ? +f.step.value : 1,
+      digits: Math.min(10, Math.max(1, +f.digits.value || 1)),
+    });
+    plan = planRename(p, names, renameOpts);
+    if (plan.error) { status.textContent = plan.error; status.classList.add('bad'); list.innerHTML = ''; return; }
+    const changed = plan.rows.filter((r) => r.to !== r.from).length;
+    const problems = plan.rows.filter((r) => r.problem).length;
+    status.classList.toggle('bad', problems > 0);
+    status.textContent = problems
+      ? `${plural(problems, 'name has a problem', 'names have a problem')}. Hover over a red name to see why.`
+      : `${plural(changed, 'name changes', 'names change')}, ${names.length - changed} stay the same.`;
+    list.innerHTML = plan.rows.map((r) => `<div class="rn-row${r.to !== r.from ? ' changed' : ''}${r.problem ? ' bad' : ''}" role="row"${r.problem ? ` title="${esc(r.problem)}"` : ''}>`
+      + `<span class="rn-old" role="cell">${esc(r.from)}</span><span class="rn-arrow" aria-hidden="true">→</span>`
+      + `<span class="rn-new" role="cell">${esc(r.to)}${r.problem ? `<em>${esc(r.problem)}</em>` : ''}</span></div>`).join('');
+  };
+  $('.rn-form', wrap).addEventListener('input', update);
+  $('.rn-form', wrap).addEventListener('submit', (e) => { e.preventDefault(); go(); });
+  f.name.addEventListener('focus', () => { lastMask = f.name; });
+  f.ext.addEventListener('focus', () => { lastMask = f.ext; });
+  $('.rn-chips', wrap).addEventListener('mousedown', (e) => e.preventDefault());
+  $('.rn-chips', wrap).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ins]');
+    if (!b) return;
+    const inp = lastMask;
+    const s = inp.selectionStart ?? inp.value.length;
+    const t = inp.selectionEnd ?? s;
+    inp.value = inp.value.slice(0, s) + b.dataset.ins + inp.value.slice(t);
+    inp.focus();
+    inp.setSelectionRange(s + b.dataset.ins.length, s + b.dataset.ins.length);
+    update();
+  });
+  $('[data-go]', wrap).addEventListener('click', go);
+  const undoBtn = $('[data-undo]', wrap);
+  if (undoBtn) undoBtn.addEventListener('click', () => { dlg.close(); undoRename(p); });
+  update();
+  f.name.focus();
+  f.name.select();
+}
+
+/* ---------- compare folders (Shift+F2) ---------- */
+/* Selects, in both panes, what the other pane is missing or has an older
+   copy of, so F5 brings the two folders level. */
+function compareDirs() {
+  const [L, R] = panes;
+  if (!L.listing || !R.listing) return;
+  if (samePath(pathOf(L), pathOf(R))) { toast('Both panes show the same folder.', 'info'); return; }
+  const fold = (s) => (SEP === '\\' ? s.toLowerCase() : s);
+  const visible = (p) => p.listing.entries.filter((e) => state.hidden || !e.hidden);
+  const rmap = new Map(visible(R).map((e) => [fold(e.name), e]));
+  const lmap = new Map(visible(L).map((e) => [fold(e.name), e]));
+  L.selected.clear();
+  R.selected.clear();
+  let same = 0;
+  for (const [k, a] of lmap) {
+    const b = rmap.get(k);
+    if (!b) { L.selected.add(a.name); continue; }
+    if (a.isDir || b.isDir) { if (a.isDir !== b.isDir) { L.selected.add(a.name); R.selected.add(b.name); } continue; }
+    const close = Math.abs(a.mtime - b.mtime) < 2000;
+    if (close && a.size === b.size) { same++; continue; }
+    if (close || a.mtime > b.mtime) L.selected.add(a.name);
+    if (close || b.mtime > a.mtime) R.selected.add(b.name);
+  }
+  for (const [k, b] of rmap) if (!lmap.has(k)) R.selected.add(b.name);
+  for (const p of panes) { build(p, currentName(p)); }
+  const nl = L.selected.size;
+  const nr = R.selected.size;
+  if (!nl && !nr) toast(`Both folders have the same files (${plural(same, 'file', 'files')} compared). Folders inside aren’t compared; use Synchronize folders for that.`, 'ok');
+  else toast(`Selected ${nl} on the left and ${nr} on the right that are missing or newer than the other side. ${plural(same, 'file is', 'files are')} the same.`, 'info');
+}
+
+/* ---------- synchronize folders (Ctrl+Shift+S) ---------- */
+/* Compares two folder trees, shows what would be copied which way, and
+   copies on request. Nothing is ever deleted. */
+const syncOpts = { content: false, hidden: false, direction: 'both', show: { lr: true, rl: true, none: false, skip: true } };
+const SYNC_GLYPH = { lr: '→', rl: '←', none: '=', skip: '·' };
+const SYNC_LABEL = { lr: 'Copy to the right', rl: 'Copy to the left', none: 'The same', skip: 'Left alone' };
+const SYNC_MAX_ROWS = 5000;
+
+function syncDefault(it, direction) {
+  let a = { 'left-only': 'lr', 'left-newer': 'lr', 'right-only': 'rl', 'right-newer': 'rl', equal: 'none', conflict: 'skip' }[it.state];
+  if ((direction === 'lr' && a === 'rl') || (direction === 'rl' && a === 'lr')) a = 'skip';
+  return a;
+}
+
+function showSync() {
+  const html = `<header><h2>Synchronize folders</h2><button class="btn" data-close>Close</button></header>
+    <form class="sync-form" autocomplete="off">
+      <label class="dlg-field"><span>Left</span><input class="dlg-input" name="left" spellcheck="false"></label>
+      <label class="dlg-field"><span>Right</span><input class="dlg-input" name="right" spellcheck="false"></label>
+      <div class="find-opts">
+        <label>Direction <select name="direction" class="dlg-select">
+          <option value="both">Both ways</option><option value="lr">Left to right only</option><option value="rl">Right to left only</option></select></label>
+        <label><input type="checkbox" name="content"> Compare contents of same-size files</label>
+        <label><input type="checkbox" name="hidden"> Include hidden</label>
+        <span class="find-hint"></span>
+        <button class="btn primary" data-scan type="submit">Compare</button>
+      </div>
+    </form>
+    <div class="sync-bar">
+      ${['lr', 'rl', 'none', 'skip'].map((a) => `<button class="chip sync-f" data-f="${a}" aria-pressed="false" title="Show or hide: ${SYNC_LABEL[a]}"><b class="sg-${a}">${SYNC_GLYPH[a]}</b> ${SYNC_LABEL[a]} <span class="n">0</span></button>`).join('')}
+    </div>
+    <div class="find-status sync-status" aria-live="polite">Choose two folders and press Compare.</div>
+    <div class="sync-head"><span>Name</span><span class="num">Left</span><span></span><span class="num">Right</span></div>
+    <div class="find-results sync-list" role="table" aria-label="Differences"></div>
+    <footer><span class="find-tip">Click an arrow to change what happens to that item. Nothing is deleted.</span>
+      <button class="btn primary" data-sync disabled>Synchronize</button></footer>`;
+  let items = [];
+  let running = null;
+  let roots = null;
+  const dlg = toolDialog('syncer', html, {
+    onKey: (e) => {
+      if (e.key === 'Escape' && running) { e.preventDefault(); api.cancel(running); return true; }
+      return false;
+    },
+    onClose: () => { if (running) api.cancel(running); },
+  });
+  const { wrap } = dlg;
+  const f = $('.sync-form', wrap).elements;
+  const list = $('.sync-list', wrap);
+  const status = $('.sync-status', wrap);
+  const syncBtn = $('[data-sync]', wrap);
+  const scanBtn = $('[data-scan]', wrap);
+  f.left.value = pathOf(panes[0]);
+  f.right.value = pathOf(panes[1]);
+  f.direction.value = syncOpts.direction;
+  f.content.checked = syncOpts.content;
+  f.hidden.checked = syncOpts.hidden;
+
+  const side = (x) => (x ? `<span class="sz">${x.isDir ? 'Folder' : fmtSize(x.size)}</span><span class="dt">${fmtDate(x.mtime)}</span>` : '<span class="none">—</span>');
+  const render = () => {
+    const counts = { lr: 0, rl: 0, none: 0, skip: 0 };
+    for (const it of items) counts[it.action]++;
+    for (const b of $$('.sync-f', wrap)) {
+      b.setAttribute('aria-pressed', String(syncOpts.show[b.dataset.f]));
+      $('.n', b).textContent = counts[b.dataset.f];
+    }
+    const shown = items.filter((it) => syncOpts.show[it.action]);
+    let html2 = '';
+    for (const it of shown.slice(0, SYNC_MAX_ROWS)) {
+      const i = items.indexOf(it);
+      const k = kindOf({ name: baseName(it.rel), isDir: (it.left || it.right).isDir });
+      html2 += `<div class="sync-row k-${k}" role="row" data-i="${i}">`
+        + `<span class="c-name"><span class="ico">${k === 'folder' ? ICON.folder : ICON.file}</span><span class="nm" title="${esc(it.rel)}">${esc(it.rel)}</span></span>`
+        + `<span class="sync-side">${side(it.left)}</span>`
+        + `<button class="sync-act sg-${it.action}" data-act="${i}" title="${SYNC_LABEL[it.action]}${it.state === 'conflict' ? ' (both changed at the same time, or a file and a folder share the name)' : ''}"${it.action === 'none' ? ' disabled' : ''}>${SYNC_GLYPH[it.action]}</button>`
+        + `<span class="sync-side">${side(it.right)}</span></div>`;
+    }
+    if (shown.length > SYNC_MAX_ROWS) html2 += `<div class="qv-note">Showing the first ${SYNC_MAX_ROWS} of ${shown.length}. Hide some kinds with the buttons above.</div>`;
+    if (roots && !shown.length) html2 = `<div class="qv-note">${items.length ? 'Nothing to show with these filters.' : 'The folders are identical.'}</div>`;
+    list.innerHTML = html2;
+    syncBtn.disabled = !(counts.lr || counts.rl) || !!running;
+    syncBtn.textContent = counts.lr || counts.rl ? `Synchronize ${counts.lr + counts.rl}` : 'Synchronize';
+  };
+
+  const scan = async () => {
+    if (running) { api.cancel(running); return; }
+    Object.assign(syncOpts, { content: f.content.checked, hidden: f.hidden.checked, direction: f.direction.value });
+    const left = f.left.value.trim();
+    const right = f.right.value.trim();
+    if (!left || !right) return;
+    const id = `sync-${Date.now()}`;
+    running = id;
+    items = [];
+    roots = null;
+    render();
+    wrap.classList.add('busy');
+    scanBtn.textContent = 'Stop';
+    status.classList.remove('bad');
+    status.textContent = 'Comparing…';
+    const onScan = (pr) => { if (pr.id === id && running === id) status.textContent = `Comparing… ${plural(pr.totalFiles || 0, 'item', 'items')} looked at`; };
+    syncProgress.set(id, onScan);
+    const res = await api.syncScan({ id, left, right, content: syncOpts.content, hidden: syncOpts.hidden });
+    syncProgress.delete(id);
+    if (running !== id) return;
+    running = null;
+    wrap.classList.remove('busy');
+    scanBtn.textContent = 'Compare';
+    if (!res.ok) {
+      status.textContent = res.cancelled ? 'Stopped.' : res.error;
+      status.classList.toggle('bad', !res.cancelled);
+      render();
+      return;
+    }
+    roots = { left, right };
+    items = res.items.map((it) => ({ ...it, action: syncDefault(it, syncOpts.direction) }));
+    const diff = items.filter((it) => it.action !== 'none').length;
+    status.textContent = diff ? `${plural(diff, 'difference', 'differences')} found, ${items.length - diff} the same.` : `The folders are identical (${plural(items.length, 'item', 'items')}).`;
+    render();
+  };
+
+  const runSync = async () => {
+    if (!roots || running) return;
+    const lr = items.filter((it) => it.action === 'lr').map((it) => ({ src: join(roots.left, it.rel), dest: join(roots.right, it.rel) }));
+    const rl = items.filter((it) => it.action === 'rl').map((it) => ({ src: join(roots.right, it.rel), dest: join(roots.left, it.rel) }));
+    syncBtn.disabled = true;
+    const errors = [];
+    let done = 0;
+    let cancelled = false;
+    for (const [batch, title] of [[lr, 'to the right'], [rl, 'to the left']]) {
+      if (!batch.length || cancelled) continue;
+      const card = progressCard(`Copying ${plural(batch.length, 'item', 'items')} ${title}`);
+      running = card.id;
+      const res = await api.transfer({ id: card.id, mode: 'copy', items: batch, overwrite: true });
+      card.close();
+      running = null;
+      done += res.done;
+      errors.push(...res.errors);
+      cancelled = res.cancelled;
+    }
+    if (errors.length) toast(errors.slice(0, 3).join('\n') + (errors.length > 3 ? `\n…and ${errors.length - 3} more` : ''), 'error');
+    if (cancelled) toast('Cancelled. Anything already copied stays where it is.', 'info');
+    else if (done) toast(`Synchronized ${plural(done, 'item', 'items')}.`, 'ok');
+    refreshAll();
+    if (wrap.isConnected) scan();
+  };
+
+  $('.sync-form', wrap).addEventListener('submit', (e) => { e.preventDefault(); scan(); });
+  f.direction.addEventListener('change', () => {
+    syncOpts.direction = f.direction.value;
+    for (const it of items) it.action = syncDefault(it, syncOpts.direction);
+    render();
+  });
+  $('.sync-bar', wrap).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    syncOpts.show[b.dataset.f] = !syncOpts.show[b.dataset.f];
+    render();
+  });
+  list.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const it = items[+b.dataset.act];
+    // Cycle through what makes sense for this item; one-sided items can't be copied from the empty side.
+    const options = it.state === 'left-only' ? ['lr', 'skip'] : it.state === 'right-only' ? ['rl', 'skip'] : ['lr', 'rl', 'skip'];
+    it.action = options[(options.indexOf(it.action) + 1) % options.length];
+    syncOpts.show[it.action] = true;
+    render();
+  });
+  syncBtn.addEventListener('click', runSync);
+  render();
+  scanBtn.focus();
+  if (!samePath(f.left.value, f.right.value)) scan();
+}
+const syncProgress = new Map();
 
 /* ---------- quick view (Ctrl+Q) ---------- */
 /* While on, the pane you're not working in previews whatever is under the
@@ -1554,6 +2001,8 @@ function onKeyDown(e) {
       case 'v': handled(); clipPaste(); return;
       case 'd': handled(); showHotlist(p, true); return;
       case 'q': handled(); toggleQuickView(); return;
+      case 'm': handled(); showRenamer(p); return;
+      case 's': if (e.shiftKey) { handled(); showSync(); return; } break;
       case '=':
       case '+': handled(); selectByMask(p, true); return;
       case '-': handled(); selectByMask(p, false); return;
@@ -1596,7 +2045,7 @@ function onKeyDown(e) {
       if (p.filter) setFilter(p, '');
       else if (p.selected.size) clearSel(p);
       return;
-    case 'F2': handled(); doRename(); return;
+    case 'F2': handled(); if (e.shiftKey) compareDirs(); else doRename(); return;
     case 'F3': handled(); doView(); return;
     case 'F4': handled(); if (e.shiftKey) doNewFile(); else doOpen(); return;
     case 'F5': handled(); transfer('copy', { here: e.shiftKey }); return;
@@ -1686,13 +2135,14 @@ function bindGlobal() {
   const actions = {
     rename: doRename, view: doView, open: doOpen, copy: () => transfer('copy'),
     move: () => transfer('move'), mkdir: doMkdir, delete: doDelete,
-    newfile: doNewFile, copyas: () => transfer('copy', { here: true }),
+    newfile: doNewFile, copyas: () => transfer('copy', { here: true }), compare: compareDirs,
   };
   $('.actionbar').addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
     if (b) actions[(e.shiftKey && b.dataset.sact) || b.dataset.act]();
   });
   $('#btn-find').addEventListener('click', () => showFind(act()));
+  $('#btn-sync').addEventListener('click', showSync);
   $('#btn-qv').addEventListener('click', toggleQuickView);
   $('#btn-hidden').addEventListener('click', toggleHidden);
   $('#btn-theme').addEventListener('click', () => {

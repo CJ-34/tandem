@@ -279,3 +279,145 @@ test('the title bar button opens Find files', async () => {
   await expect(win.locator('.finder')).toBeVisible();
   await expect(win.locator('.finder [name="root"]')).toHaveValue(home);
 });
+
+async function openIn(i, dir) {
+  await pane(i).locator('.status').click();
+  await expect(pane(i)).toHaveClass(/active/);
+  await win.keyboard.press('Control+l');
+  await pane(i).locator('.pathinput').fill(dir);
+  await pane(i).locator('.pathinput').press('Enter');
+  await expect(pane(i).locator('.crumb.last')).toHaveText(path.basename(dir));
+}
+
+async function selectNames(i, names) {
+  for (const n of names) {
+    await row(i, n).click({ modifiers: ['Control'] });
+    await expect(row(i, n)).toHaveClass(/sel/);
+  }
+}
+
+test.describe('multi-rename', () => {
+  const renamer = () => win.locator('.renamer');
+  const field = (name) => renamer().locator(`[name="${name}"]`);
+  const preview = () => renamer().locator('.rn-row');
+
+  test('renames with a counter mask and can undo it', async () => {
+    await selectNames(0, ['alpha.txt', 'beta.jpg']);
+    await win.keyboard.press('Control+m');
+    await expect(renamer()).toBeVisible();
+    await field('name').fill('photo-[C]');
+    await field('digits').fill('2');
+    await expect(preview().nth(0).locator('.rn-new')).toHaveText('photo-01.txt');
+    await expect(preview().nth(1).locator('.rn-new')).toHaveText('photo-02.jpg');
+    await field('name').press('Enter');
+    await expect(renamer()).toHaveCount(0);
+    await expect(row(0, 'photo-01.txt')).toHaveClass(/sel/);
+    expect(fs.readFileSync(path.join(home, 'photo-01.txt'), 'utf8')).toBe('hello from alpha\n');
+    expect(fs.existsSync(path.join(home, 'photo-02.jpg'))).toBe(true);
+
+    await win.keyboard.press('Control+m');
+    await renamer().locator('[data-undo]').click();
+    await expect(row(0, 'alpha.txt')).toBeVisible();
+    expect(fs.existsSync(path.join(home, 'alpha.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(home, 'photo-01.txt'))).toBe(false);
+  });
+
+  test('find and replace, ranges and case', async () => {
+    await selectNames(0, ['alpha.txt', 'beta.jpg']);
+    await win.keyboard.press('Control+m');
+    await field('name').fill('[N1-3]_[YMD]');
+    await field('search').fill('_\\d+');
+    await field('regex').check();
+    await field('replace').fill('-x');
+    await field('caseMode').selectOption('upper');
+    await expect(preview().nth(0).locator('.rn-new')).toHaveText('ALP-X.TXT');
+    await expect(preview().nth(1).locator('.rn-new')).toHaveText('BET-X.JPG');
+  });
+
+  test('refuses names that clash and changes nothing', async () => {
+    await selectNames(0, ['alpha.txt', 'beta.jpg']);
+    await win.keyboard.press('Control+m');
+    await field('name').fill('same');
+    await field('ext').fill('txt');
+    await expect(renamer().locator('.rn-row.bad')).toHaveCount(2);
+    await expect(renamer().locator('.rn-status')).toContainText('problem');
+    await field('name').press('Enter');
+    await expect(renamer()).toBeVisible();
+    expect(fs.existsSync(path.join(home, 'alpha.txt'))).toBe(true);
+  });
+
+  test('shifts names that are taken by other items in the batch', async () => {
+    for (const n of [1, 2, 3]) fs.writeFileSync(path.join(home, `f${n}.txt`), `file ${n}`);
+    await win.keyboard.press('Control+r');
+    await selectNames(0, ['f1.txt', 'f2.txt', 'f3.txt']);
+    await win.keyboard.press('Control+m');
+    await field('name').fill('f[C]');
+    await field('start').fill('2');
+    await expect(renamer().locator('.rn-row.bad')).toHaveCount(0);
+    await field('name').press('Enter');
+    await expect(row(0, 'f4.txt')).toBeVisible();
+    expect(fs.existsSync(path.join(home, 'f1.txt'))).toBe(false);
+    for (const n of [1, 2, 3]) expect(fs.readFileSync(path.join(home, `f${n + 1}.txt`), 'utf8')).toBe(`file ${n}`);
+  });
+});
+
+test.describe('comparing folders', () => {
+  const L = () => path.join(home, 'left');
+  const R = () => path.join(home, 'right');
+  const old = new Date('2024-01-01T10:00:00Z');
+  const recent = new Date('2025-06-01T10:00:00Z');
+
+  test.beforeEach(async () => {
+    fs.mkdirSync(path.join(L(), 'sub'), { recursive: true });
+    fs.mkdirSync(path.join(R(), 'sub'), { recursive: true });
+    const put = (file, text, when) => { fs.writeFileSync(file, text); fs.utimesSync(file, when, when); };
+    put(path.join(L(), 'same.txt'), 'same', old);
+    put(path.join(R(), 'same.txt'), 'same', old);
+    put(path.join(L(), 'only-left.txt'), 'L', old);
+    put(path.join(R(), 'only-right.txt'), 'R', old);
+    put(path.join(L(), 'changed.txt'), 'new version', recent);
+    put(path.join(R(), 'changed.txt'), 'old', old);
+    put(path.join(R(), 'sub', 'deep.txt'), 'deep', recent);
+    await openIn(0, L());
+    await openIn(1, R());
+  });
+
+  test('Shift+F2 selects what the other side is missing or has older', async () => {
+    await pane(0).locator('.list').focus();
+    await win.keyboard.press('Shift+F2');
+    await expect(row(0, 'only-left.txt')).toHaveClass(/sel/);
+    await expect(row(0, 'changed.txt')).toHaveClass(/sel/);
+    await expect(row(0, 'same.txt')).not.toHaveClass(/sel/);
+    await expect(row(1, 'only-right.txt')).toHaveClass(/sel/);
+    await expect(row(1, 'changed.txt')).not.toHaveClass(/sel/);
+    await expect(pane(0).locator('.status .count')).toContainText('2 of');
+  });
+
+  test('Synchronize copies the differences both ways, including subfolders', async () => {
+    const syncer = () => win.locator('.syncer');
+    await pane(0).locator('.list').focus();
+    await win.keyboard.press('Control+Shift+S');
+    await expect(syncer()).toBeVisible();
+    await expect(syncer().locator('.sync-status')).toContainText('4 differences');
+    await expect(syncer().locator('.sync-row')).toHaveCount(4);
+    await expect(syncer().locator('[data-sync]')).toHaveText('Synchronize 4');
+    await syncer().locator('[data-sync]').click();
+    await expect(syncer().locator('.sync-status')).toContainText('identical');
+    expect(fs.readFileSync(path.join(R(), 'only-left.txt'), 'utf8')).toBe('L');
+    expect(fs.readFileSync(path.join(L(), 'only-right.txt'), 'utf8')).toBe('R');
+    expect(fs.readFileSync(path.join(R(), 'changed.txt'), 'utf8')).toBe('new version');
+    expect(fs.readFileSync(path.join(L(), 'sub', 'deep.txt'), 'utf8')).toBe('deep');
+  });
+
+  test('one-way sync leaves the other side alone', async () => {
+    const syncer = () => win.locator('.syncer');
+    await win.locator('#btn-sync').click();
+    await expect(syncer().locator('.sync-status')).toContainText('4 differences');
+    await syncer().locator('[name="direction"]').selectOption('lr');
+    await expect(syncer().locator('[data-sync]')).toHaveText('Synchronize 2');
+    await syncer().locator('[data-sync]').click();
+    await expect(syncer().locator('.sync-status')).toContainText('2 differences');
+    expect(fs.existsSync(path.join(R(), 'only-left.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(L(), 'only-right.txt'))).toBe(false);
+  });
+});

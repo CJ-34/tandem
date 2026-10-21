@@ -729,6 +729,137 @@ ipcMain.handle('fs:rename', async (_e, from, name) => {
   }
 });
 
+/* Multi-rename. Names inside one folder can be swapped or shifted (a→b,
+   b→c), so when a new name is still taken by another item in the batch,
+   everything goes through temporary names first. */
+ipcMain.handle('fs:renameMany', async (_e, dir, pairs) => {
+  const result = { done: [], errors: [] };
+  const changed = pairs.filter((pr) => pr.from !== pr.to);
+  for (const pr of changed) {
+    const problem = nameProblem(pr.to);
+    if (problem) result.errors.push(`${pr.to}: ${problem}`);
+  }
+  const targets = new Set();
+  for (const pr of pairs) {
+    const key = norm(path.join(dir, pr.to));
+    if (targets.has(key)) result.errors.push(`Two items would both be named “${pr.to}”.`);
+    targets.add(key);
+  }
+  const sources = new Set(pairs.map((pr) => norm(path.join(dir, pr.from))));
+  for (const pr of changed) {
+    const to = path.join(dir, pr.to);
+    if (!sources.has(norm(to)) && await exists(to)) result.errors.push(`“${pr.to}” already exists here.`);
+  }
+  if (result.errors.length) return result;
+
+  const viaTemp = changed.some((pr) => {
+    const to = norm(path.join(dir, pr.to));
+    return sources.has(to) && to !== norm(path.join(dir, pr.from));
+  });
+  await withReleased(changed.map((pr) => path.join(dir, pr.from)), async () => {
+    const steps = [];
+    for (const [i, pr] of changed.entries()) {
+      const from = path.join(dir, pr.from);
+      if (!viaTemp) { steps.push({ pr, from, cur: from }); continue; }
+      const tmp = path.join(dir, `.tandem-rename-${process.pid}-${Date.now()}-${i}`);
+      try {
+        await fsp.rename(from, tmp);
+        steps.push({ pr, from, cur: tmp });
+      } catch (err) {
+        result.errors.push(describe(err, from));
+      }
+    }
+    for (const s of steps) {
+      try {
+        await fsp.rename(s.cur, path.join(dir, s.pr.to));
+        result.done.push(s.pr);
+      } catch (err) {
+        result.errors.push(describe(err, s.from));
+        if (s.cur !== s.from) await fsp.rename(s.cur, s.from).catch(() => {});
+      }
+    }
+  });
+  return result;
+});
+
+/* ---------- folder sync ---------- */
+
+/* Compares two folder trees by relative path. A folder that exists on only
+   one side is reported once, without looking inside it. */
+async function sameContent(a, b, signal) {
+  const CHUNK = 1 << 20;
+  const [fa, fb] = await Promise.all([fsp.open(a, 'r'), fsp.open(b, 'r')]);
+  try {
+    const ba = Buffer.alloc(CHUNK);
+    const bb = Buffer.alloc(CHUNK);
+    for (let pos = 0; ; pos += CHUNK) {
+      if (signal.aborted) throw abortError();
+      const [ra, rb] = await Promise.all([fa.read(ba, 0, CHUNK, pos), fb.read(bb, 0, CHUNK, pos)]);
+      if (ra.bytesRead !== rb.bytesRead) return false;
+      if (!ra.bytesRead) return true;
+      if (!ba.subarray(0, ra.bytesRead).equals(bb.subarray(0, rb.bytesRead))) return false;
+    }
+  } finally {
+    await Promise.all([fa.close(), fb.close()]);
+  }
+}
+
+ipcMain.handle('sync:scan', async (e, { id, left, right, content, hidden }) => {
+  const ac = new AbortController();
+  ops.set(id, ac);
+  const items = [];
+  let seen = 0;
+  let last = 0;
+  const progress = () => {
+    const now = Date.now();
+    if (now - last < 150 || e.sender.isDestroyed()) return;
+    last = now;
+    e.sender.send('op:progress', { id, phase: 'scan', totalFiles: seen, current: '' });
+  };
+  const info = (st) => (st ? { isDir: st.isDirectory(), size: st.isDirectory() ? null : st.size, mtime: st.mtimeMs } : null);
+  const isHidden = (name) => name.startsWith('.') || (isWin && SYSTEM_NAMES.has(name.toLowerCase()));
+  async function compare(rel) {
+    if (ac.signal.aborted) throw abortError();
+    const names = new Set();
+    const read = async (root) => { try { return await fsp.readdir(path.join(root, rel)); } catch { return []; } };
+    for (const n of await read(left)) names.add(n);
+    for (const n of await read(right)) names.add(n);
+    for (const name of [...names].sort()) {
+      if (!hidden && isHidden(name)) continue;
+      const r = rel ? path.join(rel, name) : name;
+      const [ls, rs] = await Promise.all([fsp.lstat(path.join(left, r)).catch(() => null), fsp.lstat(path.join(right, r)).catch(() => null)]);
+      seen++;
+      progress();
+      const L = info(ls);
+      const R = info(rs);
+      if (L && R && L.isDir && R.isDir) { await compare(r); continue; }
+      const it = { rel: r, left: L, right: R, state: 'equal' };
+      if (!L) it.state = 'right-only';
+      else if (!R) it.state = 'left-only';
+      else if (L.isDir !== R.isDir) it.state = 'conflict';
+      else if (L.size === R.size && Math.abs(L.mtime - R.mtime) < 2000) it.state = 'equal';
+      else if (content && L.size === R.size && await sameContent(path.join(left, r), path.join(right, r), ac.signal)) it.state = 'equal';
+      else if (Math.abs(L.mtime - R.mtime) < 2000) it.state = 'conflict';
+      else it.state = L.mtime > R.mtime ? 'left-newer' : 'right-newer';
+      items.push(it);
+    }
+  }
+  try {
+    for (const root of [left, right]) {
+      const st = await fsp.stat(root);
+      if (!st.isDirectory()) throw friendly(`Not a folder: ${root}`);
+    }
+    if (isSameOrInside(left, right) || isSameOrInside(right, left)) throw friendly('One folder is inside the other, so they can’t be synchronized.');
+    await compare('');
+    return { ok: true, items };
+  } catch (err) {
+    if (ac.signal.aborted) return { ok: false, cancelled: true };
+    return { ok: false, error: describe(err, err.path || left) };
+  } finally {
+    ops.delete(id);
+  }
+});
+
 ipcMain.handle('fs:preview', async (_e, p, maxText = 256 * 1024) => {
   try {
     const st = await fsp.stat(p);

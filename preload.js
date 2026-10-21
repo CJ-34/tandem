@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   mkdir: (dir, name) => ipcRenderer.invoke('fs:mkdir', dir, name),
   mkfile: (dir, name) => ipcRenderer.invoke('fs:mkfile', dir, name),
   rename: (from, name) => ipcRenderer.invoke('fs:rename', from, name),
+  renameMany: (dir, pairs) => ipcRenderer.invoke('fs:renameMany', dir, pairs),
+  syncScan: (opts) => ipcRenderer.invoke('sync:scan', opts),
   dirSize: (p) => ipcRenderer.invoke('fs:dirsize', p),
   icons: (paths) => ipcRenderer.invoke('fs:icons', paths),
   preview: (p, maxText) => ipcRenderer.invoke('fs:preview', p, maxText),

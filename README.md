@@ -81,6 +81,7 @@ Change `"version"` in `package.json`, then build again, or push a tag as describ
 | F5 / F6 | Copy / move to the other pane (type a name instead of a folder to copy or move under a new name) |
 | Shift+F5 | Copy in the same folder under a new name |
 | F7 | New folder |
+| Alt+F7 | Find files by name or contents in this folder and the ones inside it. Enter goes to the result |
 | F8 or Delete | Move to the Recycle Bin |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, and paste files, shared with File Explorer |
 | Ctrl+Shift+C | Copy the full paths of the selected items as text |
@@ -104,7 +105,7 @@ Tabs, folders, favorites, sort order, theme and pane sizes are remembered betwee
 
 ## Project layout
 
-- `main.js`: window setup and all file system work (listing, copy and move with progress, delete to Recycle Bin, rename, preview, folder sizes, folder watching, clipboard).
+- `main.js`: window setup and all file system work (listing, copy and move with progress, delete to Recycle Bin, rename, preview, folder sizes, file search, file icons, folder watching, clipboard).
 - `preload.js`: the small, safe bridge between the window and the file system code.
 - `renderer/`: the interface (`index.html`, `styles.css`, `app.js`).
 - `build/`: the app icon and installer artwork.
@@ -114,4 +115,4 @@ Tabs, folders, favorites, sort order, theme and pane sizes are remembered betwee
 
 ## Not included yet
 
-Browsing inside archives, FTP/SFTP, plugins, multi-rename, file search, and folder compare/sync. The code is structured so each of these can be added as another handler in `main.js` plus a command in `app.js`.
+Browsing inside archives, FTP/SFTP, plugins, multi-rename, and folder compare/sync. The code is structured so each of these can be added as another handler in `main.js` plus a command in `app.js`.

@@ -199,3 +199,83 @@ test('files show the system icon when there is one', async () => {
   else await expect(row(0, 'alpha.txt').locator('.ico svg')).toBeVisible();
   await expect(row(0, 'docs').locator('.ico svg')).toBeVisible();
 });
+
+test.describe('find files', () => {
+  const finder = () => win.locator('.finder');
+  const results = () => finder().locator('.find-results .row');
+  const field = (name) => finder().locator(`[name="${name}"]`);
+
+  async function search({ name = '*', text = '' } = {}) {
+    await field('mask').fill(name);
+    await field('text').fill(text);
+    await field('mask').press('Enter');
+    await expect(finder().locator('.find-status')).not.toContainText('Searching');
+  }
+
+  test.beforeEach(async () => {
+    fs.mkdirSync(path.join(home, 'docs', 'deep', 'er'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'docs', 'deep', 'er', 'notes.md'), 'nothing to see\n');
+    fs.writeFileSync(path.join(home, 'docs', 'deep', 'readme.txt'), 'Hello From Deep\n');
+    await pane(0).locator('.list').focus();
+    await win.keyboard.press('Alt+F7');
+    await expect(finder()).toBeVisible();
+  });
+
+  test('finds files by name in subfolders and goes to one', async () => {
+    await search({ name: 'readme' });
+    await expect(results()).toHaveCount(2);
+    await expect(finder().locator('.find-status')).toContainText('2 matches');
+    const deep = results().filter({ hasText: 'readme.txt' });
+    await expect(deep.locator('.c-dir')).toHaveText(path.join('docs', 'deep'));
+    await deep.click();
+    await win.keyboard.press('Enter');
+    await expect(finder()).toHaveCount(0);
+    await expect(row(0, 'readme.txt')).toHaveClass(/cursor/);
+    await expect(row(0, 'er')).toBeVisible();
+  });
+
+  test('wildcards and exclusions', async () => {
+    await search({ name: '*.md; *.txt | readme*' });
+    await expect(results()).toHaveCount(2);
+    await expect(results().filter({ hasText: 'notes.md' })).toHaveCount(1);
+    await expect(results().filter({ hasText: 'alpha.txt' })).toHaveCount(1);
+  });
+
+  test('finds files by their contents, ignoring case unless asked', async () => {
+    await search({ text: 'hello from' });
+    await expect(results()).toHaveCount(2);
+    await field('matchCase').check();
+    await search({ text: 'hello from' });
+    await expect(results()).toHaveCount(1);
+    await expect(results().first()).toContainText('alpha.txt');
+  });
+
+  test('says when nothing is found, and Esc closes', async () => {
+    await search({ name: 'no-such-file' });
+    await expect(finder().locator('.find-status')).toContainText('Nothing found');
+    await win.keyboard.press('Escape');
+    await expect(finder()).toHaveCount(0);
+    await expect(pane(0).locator('.list')).toBeFocused();
+  });
+
+  test('can be stopped while it runs', async () => {
+    const wide = path.join(home, 'wide');
+    for (let d = 0; d < 300; d++) {
+      fs.mkdirSync(path.join(wide, `d${d}`), { recursive: true });
+      for (let n = 0; n < 20; n++) fs.writeFileSync(path.join(wide, `d${d}`, `f${n}.txt`), 'x'.repeat(2000));
+    }
+    await field('mask').fill('*');
+    await field('text').fill('not in any file');
+    await field('mask').press('Enter');
+    await expect(finder().locator('[data-go]')).toHaveText('Stop');
+    await win.keyboard.press('Escape');
+    await expect(finder().locator('.find-status')).toContainText('Stopped');
+    await expect(finder()).toBeVisible();
+  });
+});
+
+test('the title bar button opens Find files', async () => {
+  await win.locator('#btn-find').click();
+  await expect(win.locator('.finder')).toBeVisible();
+  await expect(win.locator('.finder [name="root"]')).toHaveValue(home);
+});

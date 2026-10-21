@@ -7,6 +7,7 @@ const fsp = fs.promises;
 const { execFile } = require('child_process');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
+const { StringDecoder } = require('string_decoder');
 
 const isWin = process.platform === 'win32';
 const BG = { dark: '#1E232C', light: '#E9EDF2' };
@@ -231,7 +232,8 @@ ipcMain.handle('fs:existing', async (_e, paths) => {
 });
 
 /* Walks folder trees with a fixed number of parallel reads. Links and
-   junctions are not followed, so loops like "Application Data" can't trap it. */
+   junctions are not followed, so loops like "Application Data" can't trap it.
+   visit may be async, and returning false skips what's inside a folder. */
 function walk(roots, visit, signal, limit = 16) {
   return new Promise((resolve, reject) => {
     const queue = roots.slice();
@@ -248,7 +250,7 @@ function walk(roots, visit, signal, limit = 16) {
           let st = null;
           try { st = await fsp.lstat(p); } catch { /* unreadable */ }
           if (!st) return;
-          visit(p, st);
+          if ((await visit(p, st)) === false) return;
           if (st.isDirectory()) {
             try { for (const n of await fsp.readdir(p)) queue.push(path.join(p, n)); } catch { /* unreadable */ }
           }
@@ -269,6 +271,96 @@ ipcMain.handle('fs:dirsize', async (_e, p) => {
   } catch (err) {
     return { ok: false, error: describe(err, p) };
   }
+});
+
+/* ---------- search ---------- */
+
+const SEARCH_LIMIT = 10000;
+const TEXT_SEARCH_MAX = 256 * 1024 * 1024;
+const isHiddenName = (n) => n.startsWith('.') || (isWin && SYSTEM_NAMES.has(n.toLowerCase()));
+
+/* "*.jpg; report*" matches either, "| *.tmp" leaves those out, and a name
+   without wildcards matches anywhere in the name. */
+function nameMatcher(mask) {
+  const [inc, exc = ''] = String(mask || '*').split('|');
+  const parse = (str) => [...str.matchAll(/"([^"]*)"|([^;\s]+)/g)].map((m) => {
+    let body = m[1] ?? m[2];
+    if (!/[*?]/.test(body)) body = `*${body}*`;
+    const src = body === '*.*' ? '.*' : body.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp(`^${src}$`, 'i');
+  });
+  const yes = parse(inc);
+  const no = parse(exc);
+  return (name) => (!yes.length || yes.some((re) => re.test(name))) && !no.some((re) => re.test(name));
+}
+
+/* Reads in chunks, keeping the end of each one so a match can span two. */
+async function fileContains(p, needle, matchCase, signal) {
+  const want = matchCase ? needle : needle.toLowerCase();
+  const decoder = new StringDecoder('utf8');
+  let tail = '';
+  const stream = fs.createReadStream(p, { highWaterMark: 1024 * 1024, signal });
+  try {
+    for await (const chunk of stream) {
+      const text = tail + decoder.write(chunk);
+      if ((matchCase ? text : text.toLowerCase()).includes(want)) return true;
+      tail = text.slice(-(want.length - 1) || text.length);
+    }
+    return false;
+  } finally {
+    stream.destroy();
+  }
+}
+
+/* Matches go to the window in batches on one channel, ending with a batch
+   marked done, so none can arrive after the search has been reported over. */
+ipcMain.handle('search:run', async (e, { id, root, mask, text, matchCase, hidden }) => {
+  const ac = new AbortController();
+  ops.set(id, ac);
+  const matches = nameMatcher(mask);
+  const sender = e.sender;
+  let found = [];
+  let count = 0;
+  let dirs = 0;
+  let files = 0;
+  let truncated = false;
+  let last = 0;
+  const send = (done) => {
+    if (!sender.isDestroyed()) sender.send('search:found', { id, items: found, dirs, files, done });
+    found = [];
+  };
+  let result;
+  try {
+    const base = path.resolve(root);
+    await walk([base], async (p, st) => {
+      if (p === base) return true;
+      const name = path.basename(p);
+      if (!hidden && isHiddenName(name)) return false;
+      const isDir = st.isDirectory();
+      if (isDir) dirs++; else files++;
+      let hit = matches(name);
+      if (hit && text) {
+        hit = !isDir && st.size <= TEXT_SEARCH_MAX;
+        if (hit) { try { hit = await fileContains(p, text, matchCase, ac.signal); } catch { hit = false; } }
+      }
+      if (hit) {
+        found.push({ path: p, name, isDir, size: isDir ? null : st.size, mtime: st.mtimeMs });
+        if (++count >= SEARCH_LIMIT) { truncated = true; ac.abort(); }
+      }
+      const now = Date.now();
+      if (now - last >= 150) { last = now; send(null); }
+      return true;
+    }, ac.signal, 8);
+    result = { ok: true, count, dirs, files };
+  } catch (err) {
+    result = isAbort(err, { signal: ac.signal })
+      ? { ok: true, count, dirs, files, cancelled: !truncated, truncated }
+      : { ok: false, error: describe(err, root) };
+  } finally {
+    ops.delete(id);
+  }
+  send(result);
+  return result;
 });
 
 /* ---------- folder watching ---------- */

@@ -557,6 +557,49 @@ kbd {
 .viewer-note { padding: 48px 16px; text-align: center; color: var(--muted); }
 .viewer-note .btn { margin-top: 14px; }
 
+/* ---------- find files ---------- */
+.finder {
+  width: min(980px, 94vw);
+  height: min(80vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: rise .16s ease-out;
+}
+.finder header,
+.finder footer { display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 16px; }
+.finder header { border-bottom: 1px solid var(--line); }
+.finder footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.finder h2 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
+.find-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+  padding: 14px 16px 6px;
+}
+.find-form .wide,
+.find-opts { grid-column: 1 / -1; }
+.find-opts { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.find-opts label { display: flex; align-items: center; gap: 6px; }
+.find-opts input { accent-color: var(--accent); }
+.find-hint { flex: 1; color: var(--faint); font-size: 12px; }
+.find-opts .btn { min-width: 92px; }
+.find-status { min-height: 30px; padding: 6px 16px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
+.busy .find-status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.find-results { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; outline: none; }
+.find-results .row {
+  position: relative;
+  left: auto;
+  right: auto;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) 72px 150px;
+}
+.c-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.find-results:focus .row.cursor { background: var(--cursor); box-shadow: inset 2px 0 0 var(--accent); }
+
 /* ---------- toasts ---------- */
 .toasts {
   position: fixed;

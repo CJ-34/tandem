@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
   stat: (p) => ipcRenderer.invoke('fs:stat', p),
   existing: (paths) => ipcRenderer.invoke('fs:existing', paths),
   transfer: (opts) => ipcRenderer.invoke('fs:transfer', opts),
+  search: (opts) => ipcRenderer.invoke('search:run', opts),
+  onFound: (cb) => ipcRenderer.on('search:found', (_e, r) => cb(r)),
   cancel: (id) => ipcRenderer.send('op:cancel', id),
   onProgress: (cb) => ipcRenderer.on('op:progress', (_e, p) => cb(p)),
   trash: (paths) => ipcRenderer.invoke('fs:trash', paths),

@@ -1129,6 +1129,176 @@ function showHotlist(p, keyboard = false) {
   openMenu(items, r.left, r.bottom + 4, { keyboard });
 }
 
+/* ---------- find files (Alt+F7) ---------- */
+/* Searches the folder tree in the main process; matches stream in while it
+   runs. Enter or a double-click opens the result's folder in the pane. */
+const lastFind = { mask: '*', text: '', matchCase: false, hidden: false };
+let findSeq = 0;
+const finds = new Map(); // search id -> callback for matches as they arrive
+
+function showFind(p) {
+  modalOpen = true;
+  hideMenu();
+  const prevFocus = document.activeElement;
+  const wrap = document.createElement('div');
+  wrap.className = 'scrim';
+  wrap.innerHTML = `<div class="finder" role="dialog" aria-modal="true" aria-labelledby="find-title">
+    <header><h2 id="find-title">Find files</h2><button class="btn" data-close>Close</button></header>
+    <form class="find-form" autocomplete="off">
+      <label class="dlg-field"><span>Name</span><input class="dlg-input" name="mask" spellcheck="false"></label>
+      <label class="dlg-field"><span>Containing text</span><input class="dlg-input" name="text" spellcheck="false" placeholder="Optional"></label>
+      <label class="dlg-field wide"><span>In</span><input class="dlg-input" name="root" spellcheck="false"></label>
+      <div class="find-opts">
+        <label><input type="checkbox" name="matchCase"> Match case</label>
+        <label><input type="checkbox" name="includeHidden"> Include hidden</label>
+        <span class="find-hint">*.jpg; report* finds either. Add | *.tmp to leave those out.</span>
+        <button class="btn primary" data-go type="submit">Search</button>
+      </div>
+    </form>
+    <div class="find-status" aria-live="polite"></div>
+    <div class="find-results" tabindex="0" role="listbox" aria-label="Results"></div>
+    <footer><span class="find-tip">Enter or double-click goes to the file. Esc stops, then closes.</span></footer>
+  </div>`;
+  $('#modal-root').append(wrap);
+  const form = $('.find-form', wrap);
+  const status = $('.find-status', wrap);
+  const list = $('.find-results', wrap);
+  const goBtn = $('[data-go]', wrap);
+  const f = form.elements;
+  f.mask.value = lastFind.mask;
+  f.text.value = lastFind.text;
+  f.root.value = pathOf(p);
+  f.matchCase.checked = lastFind.matchCase;
+  f.includeHidden.checked = lastFind.hidden;
+
+  let results = [];
+  let cursor = -1;
+  let running = null; // id of the search in progress
+  let root = '';
+
+  const rel = (full) => {
+    const dir = parentOf(full) || full;
+    if (samePath(dir, root)) return '.';
+    return dir.startsWith(root) ? dir.slice(root.length).replace(/^[\\/]+/, '') : dir;
+  };
+  const setCursor = (i) => {
+    if (!results.length) return;
+    i = Math.max(0, Math.min(results.length - 1, i));
+    const old = list.children[cursor];
+    if (old) old.classList.remove('cursor');
+    cursor = i;
+    const row = list.children[i];
+    row.classList.add('cursor');
+    row.scrollIntoView({ block: 'nearest' });
+  };
+  const add = (items) => {
+    let html = '';
+    for (const it of items) {
+      const k = kindOf(it);
+      html += `<div class="row k-${k}" role="option" data-i="${results.length}" title="${esc(it.path)}">`
+        + `<span class="c-name"><span class="ico">${k === 'folder' ? ICON.folder : ICON.file}</span><span class="nm">${esc(it.name)}</span></span>`
+        + `<span class="c-dir">${esc(rel(it.path))}</span>`
+        + `<span class="c-size">${it.isDir ? '' : fmtSize(it.size)}</span>`
+        + `<span class="c-date">${fmtDate(it.mtime)}</span></div>`;
+      results.push(it);
+    }
+    list.insertAdjacentHTML('beforeend', html);
+    if (cursor < 0 && results.length) setCursor(0);
+  };
+  const showStatus = (r, done) => {
+    const found = plural(results.length, 'match', 'matches');
+    const seen = `${plural(r.files || 0, 'file', 'files')} and ${plural(r.dirs || 0, 'folder', 'folders')} looked at`;
+    if (!done) status.textContent = `Searching… ${found} so far, ${seen}`;
+    else if (r.truncated) status.textContent = `Stopped at ${found}. Narrow the search to see the rest.`;
+    else if (r.cancelled) status.textContent = `Stopped. ${found}, ${seen}.`;
+    else status.textContent = results.length ? `${found}, ${seen}.` : `Nothing found. ${seen}.`;
+  };
+
+  const stop = () => { if (running) api.cancel(running); };
+  const start = async () => {
+    stop();
+    const opts = {
+      mask: f.mask.value.trim() || '*',
+      text: f.text.value,
+      matchCase: f.matchCase.checked,
+      hidden: f.includeHidden.checked,
+    };
+    root = f.root.value.trim();
+    if (!root) { f.root.focus(); return; }
+    Object.assign(lastFind, opts);
+    results = [];
+    cursor = -1;
+    list.innerHTML = '';
+    const id = `find-${++findSeq}`;
+    running = id;
+    goBtn.textContent = 'Stop';
+    wrap.classList.add('busy');
+    showStatus({}, false);
+    const res = await new Promise((resolve) => {
+      finds.set(id, (r) => {
+        if (running === id) { add(r.items); if (!r.done) showStatus(r, false); }
+        if (r.done) resolve(r.done);
+      });
+      api.search({ id, root, ...opts });
+    });
+    finds.delete(id);
+    if (running !== id) return;
+    running = null;
+    goBtn.textContent = 'Search';
+    wrap.classList.remove('busy');
+    if (!res.ok) { status.textContent = res.error; return; }
+    showStatus(res, true);
+    if (results.length) list.focus();
+  };
+  const goTo = async (i) => {
+    const it = results[i];
+    if (!it) return;
+    close();
+    const dir = parentOf(it.path);
+    if (dir) await navigate(p, dir, { focusName: it.name });
+    setActive(p.i);
+  };
+  const close = () => {
+    stop();
+    running = null;
+    wrap.remove();
+    modalOpen = false;
+    document.removeEventListener('keydown', onKey, true);
+    (prevFocus && prevFocus.isConnected && prevFocus !== document.body ? prevFocus : p.list).focus();
+  };
+  const onKey = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (running) stop(); else close();
+      return;
+    }
+    if (e.target !== list) return;
+    const step = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10 }[e.key];
+    if (step) { e.preventDefault(); setCursor(cursor + step); }
+    else if (e.key === 'Home') { e.preventDefault(); setCursor(0); }
+    else if (e.key === 'End') { e.preventDefault(); setCursor(results.length - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); goTo(cursor); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (running) stop(); else start();
+  });
+  list.addEventListener('mousedown', (e) => {
+    const row = e.target.closest('.row');
+    if (row) setCursor(+row.dataset.i);
+  });
+  list.addEventListener('dblclick', (e) => {
+    const row = e.target.closest('.row');
+    if (row) goTo(+row.dataset.i);
+  });
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) close(); });
+  $('[data-close]', wrap).addEventListener('click', close);
+  f.mask.focus();
+  f.mask.select();
+}
+
 /* ---------- quick view (Ctrl+Q) ---------- */
 /* While on, the pane you're not working in previews whatever is under the
    cursor in the pane you are working in. */
@@ -1399,6 +1569,7 @@ function onKeyDown(e) {
     if (k === 'ArrowRight') { handled(); goHistory(p, 1); return; }
     if (k === 'F1' || k === 'F2') { handled(); openDrivePicker(panes[k === 'F1' ? 0 : 1]); return; }
     if (k === 'Enter' && e.shiftKey) { handled(); calcAllSizes(p); return; }
+    if (k === 'F7') { handled(); showFind(p); return; }
     if (e.code === 'NumpadAdd') { handled(); selectSameExt(p); return; }
   }
   if (!ctrl && !e.altKey) {
@@ -1521,6 +1692,7 @@ function bindGlobal() {
     const b = e.target.closest('[data-act]');
     if (b) actions[(e.shiftKey && b.dataset.sact) || b.dataset.act]();
   });
+  $('#btn-find').addEventListener('click', () => showFind(act()));
   $('#btn-qv').addEventListener('click', toggleQuickView);
   $('#btn-hidden').addEventListener('click', toggleHidden);
   $('#btn-theme').addEventListener('click', () => {
@@ -1550,6 +1722,7 @@ function bindGlobal() {
   api.onFocus(() => { if (!drag) for (const p of panes) softRefresh(p); });
   api.onChanged((key) => { if (panes[key]) softRefresh(panes[key]); });
   api.onProgress(onProgress);
+  api.onFound((r) => { const cb = finds.get(r.id); if (cb) cb(r); });
 }
 
 function showFatal(message) {

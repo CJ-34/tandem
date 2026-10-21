@@ -655,6 +655,16 @@ ipcMain.handle('fs:preview', async (_e, p, maxText = 256 * 1024) => {
   }
 });
 
+/* System icons for files, as data URLs (null when the system has none). */
+ipcMain.handle('fs:icons', async (_e, paths) => mapLimit(paths, 8, async (p) => {
+  try {
+    const img = await withTimeout(app.getFileIcon(p, { size: 'normal' }), 3000, null);
+    return img && !img.isEmpty() ? img.toDataURL() : null;
+  } catch {
+    return null;
+  }
+}));
+
 ipcMain.handle('shell:open', async (_e, p) => {
   const err = await shell.openPath(p);
   return err || null;

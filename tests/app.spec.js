@@ -142,3 +142,59 @@ test('logs no errors from the window', async () => {
   await expect(row(1, 'docs')).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test.describe('a folder with 5000 files', () => {
+  const big = () => path.join(home, 'big');
+  const name = (n) => `f${String(n).padStart(4, '0')}.txt`;
+
+  test.beforeEach(async () => {
+    fs.mkdirSync(big());
+    for (let n = 1; n <= 5000; n++) fs.writeFileSync(path.join(big(), name(n)), '');
+    await win.keyboard.press('Control+r');
+    await cursorTo(0, 'big');
+    await win.keyboard.press('Enter');
+    await expect(pane(0).locator('.status .count')).toHaveText('0 folders, 5000 files');
+  });
+
+  test('only creates the rows in view', async () => {
+    await expect(row(0, name(1))).toBeVisible();
+    expect(await rows(0).count()).toBeLessThan(80);
+  });
+
+  test('End and Home move to the last and first file', async () => {
+    await win.keyboard.press('End');
+    await expect(row(0, name(5000))).toHaveClass(/cursor/);
+    await expect(row(0, name(5000))).toBeInViewport();
+    expect(await rows(0).count()).toBeLessThan(80);
+    await win.keyboard.press('Home');
+    await expect(rows(0).first()).toHaveClass(/cursor/);
+    await expect(rows(0).first()).toBeInViewport();
+  });
+
+  test('scrolling shows the rows further down', async () => {
+    await pane(0).locator('.list').evaluate((el) => { el.scrollTop = 26 * 2500; });
+    await expect(row(0, name(2500))).toBeInViewport();
+    await expect(row(0, name(1))).toHaveCount(0);
+  });
+
+  test('select all counts every file, not just the ones in view', async () => {
+    await win.keyboard.press('Control+a');
+    await expect(pane(0).locator('.status .count')).toHaveText('5000 of 5000 selected');
+    await win.keyboard.press('End');
+    await expect(row(0, name(5000))).toHaveClass(/sel/);
+  });
+
+  test('typing filters across the whole folder', async () => {
+    await win.keyboard.type('f4999');
+    await expect(rows(0)).toHaveCount(1);
+    await expect(row(0, name(4999))).toBeVisible();
+  });
+});
+
+test('files show the system icon when there is one', async () => {
+  const hasIcon = await app.evaluate(async ({ app: a }, p) => !(await a.getFileIcon(p, { size: 'normal' })).isEmpty(), path.join(home, 'alpha.txt'));
+  const img = row(0, 'alpha.txt').locator('.ico img');
+  if (hasIcon) await expect(img).toBeVisible();
+  else await expect(row(0, 'alpha.txt').locator('.ico svg')).toBeVisible();
+  await expect(row(0, 'docs').locator('.ico svg')).toBeVisible();
+});

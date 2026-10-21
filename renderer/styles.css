@@ -348,8 +348,11 @@ body.os-win32 .titlebar { padding-right: 150px; }
   outline: none;
 }
 .list.drop { background: var(--drop); }
+.vbox { position: relative; }
 .row {
-  position: relative;
+  position: absolute;
+  left: 0;
+  right: 0;
   height: 26px;
   align-items: center;
   margin: 0 4px;
@@ -364,7 +367,8 @@ body.os-win32 .titlebar { padding-right: 150px; }
 .c-size { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .c-date { font-variant-numeric: tabular-nums; }
 .ico { flex: none; width: 16px; height: 16px; color: var(--muted); }
-.ico svg { width: 16px; height: 16px; }
+.ico svg,
+.ico img { display: block; width: 16px; height: 16px; }
 .k-folder .ico { color: var(--folder); }
 .ico .band { fill: var(--kc, transparent); }
 .k-image { --kc: var(--k-image); }

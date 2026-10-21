@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   mkfile: (dir, name) => ipcRenderer.invoke('fs:mkfile', dir, name),
   rename: (from, name) => ipcRenderer.invoke('fs:rename', from, name),
   dirSize: (p) => ipcRenderer.invoke('fs:dirsize', p),
+  icons: (paths) => ipcRenderer.invoke('fs:icons', paths),
   preview: (p, maxText) => ipcRenderer.invoke('fs:preview', p, maxText),
   watch: (key, dir) => ipcRenderer.send('fs:watch', key, dir),
   onChanged: (cb) => ipcRenderer.on('fs:changed', (_e, key) => cb(key)),

@@ -120,7 +120,8 @@ function makePane(i) {
     listing: null, rows: [], cursor: 0, anchor: 0,
     selected: new Set(),
     sort: { key: 'name', dir: 1 },
-    filter: '', req: 0, pendingClear: null,
+    filter: '', req: 0, opening: 0, pendingClear: null,
+    vbox: null, win: { start: 0, end: 0 },
     sizes: new Map(), stale: false,
     list: $('.list', el), crumbs: $('.crumbs', el), pathInput: $('.pathinput', el),
     filterInput: $('.filter-input', el), drive: $('.drive', el), tablist: $('.tablist', el),
@@ -142,8 +143,11 @@ function setActive(i, focus = true) {
 const signature = (entries) => entries.map((e) => `${e.name}|${e.size}|${e.mtime}`).join('\n');
 
 async function navigate(p, dir, { push = true, focusName = null, quiet = false, soft = false } = {}) {
+  // A background refresh must not cancel a folder the user is still opening.
+  if (soft && p.opening) return true;
   const req = ++p.req;
-  const res = await api.list(dir);
+  if (!soft) p.opening = req;
+  const res = await api.list(dir).finally(() => { if (p.opening === req) p.opening = 0; });
   if (req !== p.req) return false;
   if (!res || !res.ok) {
     const msg = (res && res.error) || 'Unknown error';
@@ -263,53 +267,125 @@ function rowHtml(p, e, i) {
   const x = !e.isDir ? extOf(e.name) : '';
   if (x) name = `<span class="nm">${esc(e.name.slice(0, -(x.length + 1)))}<span class="dot-ext">.${esc(e.name.slice(-x.length))}</span></span>`;
   else name = `<span class="nm">${esc(e.name)}</span>`;
-  const ico = e.up ? ICON.up : k === 'folder' ? ICON.folder : ICON.file;
-  return `<div class="${cls.join(' ')}" data-i="${i}" role="option" draggable="${e.up ? 'false' : 'true'}">`
-    + `<span class="c-name"><span class="ico">${ico}</span>${name}</span>`
+  return `<div class="${cls.join(' ')}" data-i="${i}" role="option" aria-posinset="${i + 1}" aria-setsize="${p.rows.length}" draggable="${e.up ? 'false' : 'true'}" style="top:${i * ROW_H}px">`
+    + `<span class="c-name"><span class="ico">${iconHtml(p, e, k)}</span>${name}</span>`
     + `<span class="c-kind">${e.up ? '' : esc(kindLabel(e))}</span>`
     + `<span class="c-size">${sizeText(p, e)}</span>`
     + `<span class="c-date">${e.up ? '' : fmtDate(e.mtime)}</span></div>`;
 }
 
+/* ---------- file icons ---------- */
+/* Files show the system's own icon once it has loaded. Most types share one
+   icon per extension; programs, shortcuts and icon files have their own. */
+const OWN_ICON = new Set(['exe', 'lnk', 'ico', 'cur', 'ani', 'scr', 'url', 'msc', 'cpl', 'appref-ms']);
+const icons = new Map(); // key -> data URL, or null while loading or when there is none
+const iconKey = (p, e) => {
+  const x = extOf(e.name);
+  return OWN_ICON.has(x) ? join(pathOf(p), e.name) : `.${x}`;
+};
+
+function iconHtml(p, e, k) {
+  if (e.up) return ICON.up;
+  if (k === 'folder') return ICON.folder;
+  const url = icons.get(iconKey(p, e));
+  return url ? `<img src="${url}" alt="" draggable="false">` : ICON.file;
+}
+
+let iconTimer = null;
+function requestIcons(p) {
+  clearTimeout(iconTimer);
+  iconTimer = setTimeout(async () => {
+    const want = new Map(); // key -> a path to ask about
+    for (const q of panes) {
+      for (let i = q.win.start; i < q.win.end; i++) {
+        const e = q.rows[i];
+        if (!e || e.isDir) continue;
+        const key = iconKey(q, e);
+        if (!icons.has(key) && !want.has(key)) want.set(key, join(pathOf(q), e.name));
+      }
+    }
+    if (!want.size) return;
+    if (icons.size > 5000) icons.clear();
+    const keys = [...want.keys()];
+    for (const key of keys) icons.set(key, null);
+    let urls;
+    try { urls = await api.icons([...want.values()]); } catch { return; }
+    let got = false;
+    keys.forEach((key, n) => { if (urls[n]) { icons.set(key, urls[n]); got = true; } });
+    if (got) for (const q of panes) paintWindow(q, true);
+  }, 30);
+}
+
+/* The list only holds the rows in view, plus a few either side, laid out on
+   a spacer as tall as the whole folder, so huge folders stay quick. */
+const ROW_H = 26;
+const OVERSCAN = 8;
+
 function renderRows(p) {
   if (!p.rows.length) {
     p.list.innerHTML = `<div class="empty">${p.filter ? 'Nothing matches the filter. Press Esc to clear it.' : 'This folder is empty.'}</div>`;
+    p.vbox = null;
     return;
   }
-  let html = '';
-  for (let i = 0; i < p.rows.length; i++) html += rowHtml(p, p.rows[i], i);
-  p.list.innerHTML = html;
+  if (!p.vbox || !p.vbox.isConnected) {
+    p.list.innerHTML = '<div class="vbox"></div>';
+    p.vbox = p.list.firstChild;
+  }
+  p.vbox.style.height = `${p.rows.length * ROW_H}px`;
   scrollToCursor(p);
+  paintWindow(p, true);
 }
 
+function paintWindow(p, force = false) {
+  if (!p.vbox) return;
+  const top = p.list.scrollTop - p.vbox.offsetTop;
+  const start = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
+  const end = Math.min(p.rows.length, Math.ceil((top + p.list.clientHeight) / ROW_H) + OVERSCAN);
+  if (!force && start === p.win.start && end === p.win.end) return;
+  let html = '';
+  for (let i = start; i < end; i++) html += rowHtml(p, p.rows[i], i);
+  p.vbox.innerHTML = html;
+  p.win = { start, end };
+  requestIcons(p);
+}
+
+const rowEl = (p, i) => (p.vbox && i >= p.win.start && i < p.win.end ? p.vbox.children[i - p.win.start] || null : null);
+
 function scrollToCursor(p) {
-  const row = p.list.children[p.cursor];
-  if (row && row.classList.contains('row')) row.scrollIntoView({ block: 'nearest' });
+  if (!p.vbox) return;
+  const top = p.vbox.offsetTop + p.cursor * ROW_H;
+  const view = p.list.clientHeight;
+  if (top < p.list.scrollTop) p.list.scrollTop = top - p.vbox.offsetTop;
+  else if (top + ROW_H > p.list.scrollTop + view) p.list.scrollTop = top + ROW_H - view + p.vbox.offsetTop;
+  paintWindow(p);
 }
 
 function setCursor(p, idx) {
   if (!p.rows.length) return;
   idx = Math.max(0, Math.min(p.rows.length - 1, idx));
-  const old = p.list.children[p.cursor];
+  const old = rowEl(p, p.cursor);
   if (old) old.classList.remove('cursor');
   p.cursor = idx;
-  const row = p.list.children[idx];
-  if (row) row.classList.add('cursor');
   scrollToCursor(p);
+  const row = rowEl(p, idx);
+  if (row) row.classList.add('cursor');
   tabOf(p).cursorName = p.rows[idx].name;
   scheduleQuickView();
 }
 
 function syncSel(p) {
-  const kids = p.list.children;
-  for (let i = 0; i < p.rows.length; i++) if (kids[i]) kids[i].classList.toggle('sel', p.selected.has(p.rows[i].name));
+  for (let i = p.win.start; i < p.win.end; i++) {
+    const row = rowEl(p, i);
+    if (row && p.rows[i]) row.classList.toggle('sel', p.selected.has(p.rows[i].name));
+  }
   renderStatus(p);
 }
 function toggleSel(p, i) {
   const e = p.rows[i];
   if (!e || e.up) return;
   if (p.selected.has(e.name)) p.selected.delete(e.name); else p.selected.add(e.name);
-  if (p.list.children[i]) p.list.children[i].classList.toggle('sel', p.selected.has(e.name));
+  const row = rowEl(p, i);
+  if (row) row.classList.toggle('sel', p.selected.has(e.name));
   renderStatus(p);
 }
 function selectRange(p, a, b) {
@@ -329,7 +405,7 @@ function targets(p) {
   const e = p.rows[p.cursor];
   return e && !e.up ? [e.name] : [];
 }
-const pageSize = (p) => Math.max(1, Math.floor(p.list.clientHeight / 26) - 1);
+const pageSize = (p) => Math.max(1, Math.floor(p.list.clientHeight / ROW_H) - 1);
 
 /* ---------- folder sizes ---------- */
 function sizeOf(p, e) {
@@ -345,7 +421,8 @@ function sizeText(p, e) {
 }
 function paintSize(p, name) {
   const i = p.rows.findIndex((e) => e.name === name);
-  const cell = i >= 0 && p.list.children[i] && $('.c-size', p.list.children[i]);
+  const row = i >= 0 && rowEl(p, i);
+  const cell = row && $('.c-size', row);
   if (cell) cell.innerHTML = sizeText(p, p.rows[i]);
 }
 async function calcSizes(p, names) {
@@ -1012,8 +1089,8 @@ function showMenu(x, y, p, keyboard = false) {
 }
 
 function showMenuAtCursor(p) {
-  const row = p.list.children[p.cursor];
-  const r = (row && row.classList.contains('row') ? row : p.list).getBoundingClientRect();
+  const row = rowEl(p, p.cursor);
+  const r = (row || p.list).getBoundingClientRect();
   showMenu(r.left + 40, r.bottom, p, true);
 }
 
@@ -1050,6 +1127,176 @@ function showHotlist(p, keyboard = false) {
     : { label: 'Add this folder', key: 'A', accel: 'a', run: () => { state.hotlist.push(here); save(); toast(`Added “${baseName(here)}” to favorites.`, 'ok'); } });
   const r = $('.star', p.el).getBoundingClientRect();
   openMenu(items, r.left, r.bottom + 4, { keyboard });
+}
+
+/* ---------- find files (Alt+F7) ---------- */
+/* Searches the folder tree in the main process; matches stream in while it
+   runs. Enter or a double-click opens the result's folder in the pane. */
+const lastFind = { mask: '*', text: '', matchCase: false, hidden: false };
+let findSeq = 0;
+const finds = new Map(); // search id -> callback for matches as they arrive
+
+function showFind(p) {
+  modalOpen = true;
+  hideMenu();
+  const prevFocus = document.activeElement;
+  const wrap = document.createElement('div');
+  wrap.className = 'scrim';
+  wrap.innerHTML = `<div class="finder" role="dialog" aria-modal="true" aria-labelledby="find-title">
+    <header><h2 id="find-title">Find files</h2><button class="btn" data-close>Close</button></header>
+    <form class="find-form" autocomplete="off">
+      <label class="dlg-field"><span>Name</span><input class="dlg-input" name="mask" spellcheck="false"></label>
+      <label class="dlg-field"><span>Containing text</span><input class="dlg-input" name="text" spellcheck="false" placeholder="Optional"></label>
+      <label class="dlg-field wide"><span>In</span><input class="dlg-input" name="root" spellcheck="false"></label>
+      <div class="find-opts">
+        <label><input type="checkbox" name="matchCase"> Match case</label>
+        <label><input type="checkbox" name="includeHidden"> Include hidden</label>
+        <span class="find-hint">*.jpg; report* finds either. Add | *.tmp to leave those out.</span>
+        <button class="btn primary" data-go type="submit">Search</button>
+      </div>
+    </form>
+    <div class="find-status" aria-live="polite"></div>
+    <div class="find-results" tabindex="0" role="listbox" aria-label="Results"></div>
+    <footer><span class="find-tip">Enter or double-click goes to the file. Esc stops, then closes.</span></footer>
+  </div>`;
+  $('#modal-root').append(wrap);
+  const form = $('.find-form', wrap);
+  const status = $('.find-status', wrap);
+  const list = $('.find-results', wrap);
+  const goBtn = $('[data-go]', wrap);
+  const f = form.elements;
+  f.mask.value = lastFind.mask;
+  f.text.value = lastFind.text;
+  f.root.value = pathOf(p);
+  f.matchCase.checked = lastFind.matchCase;
+  f.includeHidden.checked = lastFind.hidden;
+
+  let results = [];
+  let cursor = -1;
+  let running = null; // id of the search in progress
+  let root = '';
+
+  const rel = (full) => {
+    const dir = parentOf(full) || full;
+    if (samePath(dir, root)) return '.';
+    return dir.startsWith(root) ? dir.slice(root.length).replace(/^[\\/]+/, '') : dir;
+  };
+  const setCursor = (i) => {
+    if (!results.length) return;
+    i = Math.max(0, Math.min(results.length - 1, i));
+    const old = list.children[cursor];
+    if (old) old.classList.remove('cursor');
+    cursor = i;
+    const row = list.children[i];
+    row.classList.add('cursor');
+    row.scrollIntoView({ block: 'nearest' });
+  };
+  const add = (items) => {
+    let html = '';
+    for (const it of items) {
+      const k = kindOf(it);
+      html += `<div class="row k-${k}" role="option" data-i="${results.length}" title="${esc(it.path)}">`
+        + `<span class="c-name"><span class="ico">${k === 'folder' ? ICON.folder : ICON.file}</span><span class="nm">${esc(it.name)}</span></span>`
+        + `<span class="c-dir">${esc(rel(it.path))}</span>`
+        + `<span class="c-size">${it.isDir ? '' : fmtSize(it.size)}</span>`
+        + `<span class="c-date">${fmtDate(it.mtime)}</span></div>`;
+      results.push(it);
+    }
+    list.insertAdjacentHTML('beforeend', html);
+    if (cursor < 0 && results.length) setCursor(0);
+  };
+  const showStatus = (r, done) => {
+    const found = plural(results.length, 'match', 'matches');
+    const seen = `${plural(r.files || 0, 'file', 'files')} and ${plural(r.dirs || 0, 'folder', 'folders')} looked at`;
+    if (!done) status.textContent = `Searching… ${found} so far, ${seen}`;
+    else if (r.truncated) status.textContent = `Stopped at ${found}. Narrow the search to see the rest.`;
+    else if (r.cancelled) status.textContent = `Stopped. ${found}, ${seen}.`;
+    else status.textContent = results.length ? `${found}, ${seen}.` : `Nothing found. ${seen}.`;
+  };
+
+  const stop = () => { if (running) api.cancel(running); };
+  const start = async () => {
+    stop();
+    const opts = {
+      mask: f.mask.value.trim() || '*',
+      text: f.text.value,
+      matchCase: f.matchCase.checked,
+      hidden: f.includeHidden.checked,
+    };
+    root = f.root.value.trim();
+    if (!root) { f.root.focus(); return; }
+    Object.assign(lastFind, opts);
+    results = [];
+    cursor = -1;
+    list.innerHTML = '';
+    const id = `find-${++findSeq}`;
+    running = id;
+    goBtn.textContent = 'Stop';
+    wrap.classList.add('busy');
+    showStatus({}, false);
+    const res = await new Promise((resolve) => {
+      finds.set(id, (r) => {
+        if (running === id) { add(r.items); if (!r.done) showStatus(r, false); }
+        if (r.done) resolve(r.done);
+      });
+      api.search({ id, root, ...opts });
+    });
+    finds.delete(id);
+    if (running !== id) return;
+    running = null;
+    goBtn.textContent = 'Search';
+    wrap.classList.remove('busy');
+    if (!res.ok) { status.textContent = res.error; return; }
+    showStatus(res, true);
+    if (results.length) list.focus();
+  };
+  const goTo = async (i) => {
+    const it = results[i];
+    if (!it) return;
+    close();
+    const dir = parentOf(it.path);
+    if (dir) await navigate(p, dir, { focusName: it.name });
+    setActive(p.i);
+  };
+  const close = () => {
+    stop();
+    running = null;
+    wrap.remove();
+    modalOpen = false;
+    document.removeEventListener('keydown', onKey, true);
+    (prevFocus && prevFocus.isConnected && prevFocus !== document.body ? prevFocus : p.list).focus();
+  };
+  const onKey = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (running) stop(); else close();
+      return;
+    }
+    if (e.target !== list) return;
+    const step = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10 }[e.key];
+    if (step) { e.preventDefault(); setCursor(cursor + step); }
+    else if (e.key === 'Home') { e.preventDefault(); setCursor(0); }
+    else if (e.key === 'End') { e.preventDefault(); setCursor(results.length - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); goTo(cursor); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (running) stop(); else start();
+  });
+  list.addEventListener('mousedown', (e) => {
+    const row = e.target.closest('.row');
+    if (row) setCursor(+row.dataset.i);
+  });
+  list.addEventListener('dblclick', (e) => {
+    const row = e.target.closest('.row');
+    if (row) goTo(+row.dataset.i);
+  });
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) close(); });
+  $('[data-close]', wrap).addEventListener('click', close);
+  f.mask.focus();
+  f.mask.select();
 }
 
 /* ---------- quick view (Ctrl+Q) ---------- */
@@ -1198,11 +1445,8 @@ function bindPane(p) {
     e.dataTransfer.effectAllowed = 'copyMove';
     e.dataTransfer.setData('text/plain', names.join('\n'));
   });
-  p.list.addEventListener('dragend', () => {
-    drag = null;
-    clearDropMarks();
-    for (const q of panes) if (q.stale) softRefresh(q);
-  });
+  p.list.addEventListener('scroll', () => paintWindow(p));
+  new ResizeObserver(() => paintWindow(p)).observe(p.list);
   p.list.addEventListener('dragover', (e) => {
     const t = dropTarget(p, e);
     if (!t) return;
@@ -1325,6 +1569,7 @@ function onKeyDown(e) {
     if (k === 'ArrowRight') { handled(); goHistory(p, 1); return; }
     if (k === 'F1' || k === 'F2') { handled(); openDrivePicker(panes[k === 'F1' ? 0 : 1]); return; }
     if (k === 'Enter' && e.shiftKey) { handled(); calcAllSizes(p); return; }
+    if (k === 'F7') { handled(); showFind(p); return; }
     if (e.code === 'NumpadAdd') { handled(); selectSameExt(p); return; }
   }
   if (!ctrl && !e.altKey) {
@@ -1428,6 +1673,12 @@ function bindGlobal() {
   document.addEventListener('keydown', shiftLabels, true);
   document.addEventListener('keyup', shiftLabels, true);
   window.addEventListener('beforeunload', save);
+  // On the document, not the list: scrolling can replace the dragged row.
+  document.addEventListener('dragend', () => {
+    drag = null;
+    clearDropMarks();
+    for (const q of panes) if (q.stale) softRefresh(q);
+  });
 
   for (const b of $$('.actionbar button, .tb-btn, .tab-add, .icon-btn, .head button')) {
     b.addEventListener('mousedown', (e) => e.preventDefault());
@@ -1441,6 +1692,7 @@ function bindGlobal() {
     const b = e.target.closest('[data-act]');
     if (b) actions[(e.shiftKey && b.dataset.sact) || b.dataset.act]();
   });
+  $('#btn-find').addEventListener('click', () => showFind(act()));
   $('#btn-qv').addEventListener('click', toggleQuickView);
   $('#btn-hidden').addEventListener('click', toggleHidden);
   $('#btn-theme').addEventListener('click', () => {
@@ -1470,6 +1722,7 @@ function bindGlobal() {
   api.onFocus(() => { if (!drag) for (const p of panes) softRefresh(p); });
   api.onChanged((key) => { if (panes[key]) softRefresh(panes[key]); });
   api.onProgress(onProgress);
+  api.onFound((r) => { const cb = finds.get(r.id); if (cb) cb(r); });
 }
 
 function showFatal(message) {

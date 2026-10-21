@@ -15,7 +15,6 @@ const panes = [];
 let drives = [];
 let modalOpen = false;
 let drag = null;
-let clipCut = false;
 
 /* ---------- file kinds ---------- */
 const KINDS = {

@@ -21,7 +21,7 @@ Windows SmartScreen may warn the first time you run them because they aren’t c
 ## Build in the cloud instead (no Node.js needed)
 
 1. Create a GitHub repository and upload this folder’s contents, including the hidden `.github` folder.
-2. On GitHub, open the Actions tab, choose “Build Windows installer”, and click “Run workflow”.
+2. On GitHub, open the Actions tab, choose “Build Windows installer”, and click “Run workflow”. It runs the checks first, then builds.
 3. When it finishes (about 5 minutes), download the `Tandem-Windows` artifact from the run page. It contains both .exe files.
 
 Pushing a tag such as `v1.0.1` also triggers a build.
@@ -33,9 +33,26 @@ npm install
 npm start
 ```
 
+## Checks and tests
+
+```
+npm run lint   # ESLint
+npm test       # end-to-end smoke tests: starts the real app and drives it with the keyboard
+npm run check  # both
+```
+
+The tests live in `tests/` and use Playwright to launch Tandem against a throwaway home folder, so they never touch your own files or settings. On Linux without a display, run them as `xvfb-run -a npm test`.
+
+## Continuous integration and releases
+
+- **CI** (`.github/workflows/ci.yml`) runs lint and the smoke tests on Windows and Linux for every push and pull request. If a test fails, the report is attached to the run.
+- **Build** (`.github/workflows/build.yml`) runs CI first, then builds the installer and portable .exe. It runs on every push to `main` (download them from the run’s `Tandem-Windows` artifact) and can be started by hand from the Actions tab.
+- **Releases**: change `"version"` in `package.json`, commit, then push a matching tag, e.g. `git tag v1.0.1 && git push origin v1.0.1`. The Build workflow checks the tag matches the version, then publishes a GitHub Release with both .exe files and generated release notes.
+- **Dependabot** (`.github/dependabot.yml`) opens weekly pull requests to update npm packages and GitHub Actions. Electron updates come one at a time so each can be tested on its own.
+
 ## Releasing a new version
 
-Change `"version"` in `package.json`, then build again. The installer upgrades an existing installation in place and keeps the user’s tabs and settings.
+Change `"version"` in `package.json`, then build again, or push a tag as described above. The installer upgrades an existing installation in place and keeps the user’s tabs and settings.
 
 ## Keyboard
 
@@ -92,7 +109,8 @@ Tabs, folders, favorites, sort order, theme and pane sizes are remembered betwee
 - `renderer/`: the interface (`index.html`, `styles.css`, `app.js`).
 - `build/`: the app icon and installer artwork.
 - `build-installer.bat`: one-click build on Windows.
-- `.github/workflows/build.yml`: cloud build on GitHub.
+- `tests/`: end-to-end smoke tests (Playwright).
+- `.github/workflows/`: CI (`ci.yml`) and the installer build and release (`build.yml`).
 
 ## Not included yet
 

@@ -26,6 +26,9 @@ const IMAGE_MIME = {
 
 let win = null;
 
+// Lets the automated tests run with a fresh, throwaway profile.
+if (process.env.TANDEM_USER_DATA) app.setPath('userData', process.env.TANDEM_USER_DATA);
+
 /* Problems are written to tandem.log in the app's data folder
    (%APPDATA%\Tandem on Windows) so they can be diagnosed after the fact. */
 function logPath() {

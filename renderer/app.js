@@ -142,13 +142,15 @@ function setActive(i, focus = true) {
 
 const signature = (entries) => entries.map((e) => `${e.name}|${e.size}|${e.mtime}`).join('\n');
 
+/* Resolves true when the folder opened, false when it couldn't be opened,
+   and null when a newer navigation in the same pane took over. */
 async function navigate(p, dir, { push = true, focusName = null, quiet = false, soft = false } = {}) {
   // A background refresh must not cancel a folder the user is still opening.
-  if (soft && p.opening) return true;
+  if (soft && p.opening) return null;
   const req = ++p.req;
   if (!soft) p.opening = req;
   const res = await api.list(dir).finally(() => { if (p.opening === req) p.opening = 0; });
-  if (req !== p.req) return false;
+  if (req !== p.req) return null;
   if (!res || !res.ok) {
     const msg = (res && res.error) || 'Unknown error';
     if (!quiet) toast(msg, 'error');
@@ -181,13 +183,14 @@ async function navigate(p, dir, { push = true, focusName = null, quiet = false, 
 async function refresh(p, focusName, soft = false) {
   const keep = focusName ?? currentName(p);
   const dir = pathOf(p);
-  if (await navigate(p, dir, { push: false, focusName: keep, quiet: true, soft })) return;
+  // Only a folder that is gone sends the pane up; a newer navigation wins as is.
+  if (await navigate(p, dir, { push: false, focusName: keep, quiet: true, soft }) !== false) return;
   let cur = dir;
   for (let n = 0; n < 40; n++) {
     const up = parentOf(cur);
     if (!up) break;
     cur = up;
-    if (await navigate(p, cur, { push: false, quiet: true })) return;
+    if (await navigate(p, cur, { push: false, quiet: true }) !== false) return;
   }
   await navigate(p, INFO.home, { push: false });
 }
@@ -580,7 +583,7 @@ function switchTab(p, i) {
   const target = t.path;
   t.path = null;
   navigate(p, target, { push: false, focusName: t.cursorName, quiet: true })
-    .then((ok) => { if (!ok) refreshMissing(p, target); });
+    .then((ok) => { if (ok === false) refreshMissing(p, target); });
   setActive(p.i);
 }
 async function refreshMissing(p, dir) {
@@ -598,7 +601,7 @@ function closeTab(p, i) {
     const target = t.path;
     t.path = null;
     navigate(p, target, { push: false, focusName: t.cursorName, quiet: true })
-      .then((ok) => { if (!ok) refreshMissing(p, target); });
+      .then((ok) => { if (ok === false) refreshMissing(p, target); });
   } else {
     renderTabs(p);
     save();
@@ -1775,8 +1778,8 @@ async function init() {
     const t = tabOf(p);
     const target = t.path;
     t.path = null;
-    if (await navigate(p, target, { push: false, focusName: t.cursorName, quiet: true })) return;
-    if (await navigate(p, INFO.home, { push: false, quiet: true })) return;
+    if (await navigate(p, target, { push: false, focusName: t.cursorName, quiet: true }) !== false) return;
+    if (await navigate(p, INFO.home, { push: false, quiet: true }) !== false) return;
     t.path = target;
     renderTabs(p);
   }));

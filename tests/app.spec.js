@@ -1,4 +1,5 @@
 'use strict';
+/* global KeyboardEvent -- used inside evaluate(), which runs in the window */
 /* End-to-end smoke tests: they start the real app against a throwaway home
    folder and drive it with the keyboard, the way a user would. */
 const { test, expect, _electron: electron } = require('@playwright/test');
@@ -142,6 +143,27 @@ test('logs no errors from the window', async () => {
   await win.keyboard.press('Tab');
   await expect(row(1, 'docs')).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('opening a folder while a refresh is still loading opens that folder', async () => {
+  await cursorTo(0, 'docs');
+  // In the same instant, so the refresh is still loading when Enter opens docs.
+  await pane(0).locator('.list').evaluate((list) => {
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await win.waitForTimeout(1000); // let the refresh finish too
+  await expect(pane(0).locator('.tab.on')).toHaveText('docs');
+  await expect(row(0, 'readme.md')).toBeVisible();
+});
+
+test('refreshing quickly several times stays in the same folder', async () => {
+  await pane(0).locator('.list').evaluate((list) => {
+    for (let n = 0; n < 6; n++) list.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true }));
+  });
+  await win.waitForTimeout(1000);
+  await expect(pane(0).locator('.tab.on')).toHaveText('home');
+  await expect(pane(1).locator('.tab.on')).toHaveText('home');
 });
 
 test.describe('a folder with 5000 files', () => {

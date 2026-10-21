@@ -78,8 +78,8 @@ function createWindow() {
   });
   win.webContents.on('preload-error', (_e, preloadPath, err) => log('preload failed:', preloadPath, err));
   win.webContents.on('render-process-gone', (_e, details) => log('window process ended:', JSON.stringify(details)));
-  win.webContents.on('console-message', (_e, level, message, line, source) => {
-    if (level >= 2) log(`window ${level === 3 ? 'error' : 'warning'}:`, message, `(${source}:${line})`);
+  win.webContents.on('console-message', ({ level, message, lineNumber, sourceId }) => {
+    if (level === 'warning' || level === 'error') log(`window ${level}:`, message, `(${sourceId}:${lineNumber})`);
   });
   log('started', app.getVersion(), process.platform, os.release());
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
